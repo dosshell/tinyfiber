@@ -1,0 +1,14 @@
+---
+Language: Cpp
+BasedOnStyle: Chromium
+IndentWidth: 4
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: None
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBraces: Allman
+ColumnLimit: 150
+ReflowComments: false
+SpacesBeforeTrailingComments: 1
+SortIncludes: false
+BreakConstructorInitializers: BeforeComma
