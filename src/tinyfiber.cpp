@@ -85,7 +85,7 @@ int tinyfiber_add_jobs(JobDeclaration jobs[], int64_t elements)
         jobs[0].wait_handle->counter += elements;
     int sts = g_job_queue.enqueue(jobs, elements);
     if (sts == 0)
-        g_no_job_cv.notify_one();
+        g_no_job_cv.notify_all();
     return sts;
 }
 
