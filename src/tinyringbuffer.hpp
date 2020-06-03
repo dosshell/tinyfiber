@@ -33,7 +33,7 @@ SOFTWARE.
 
 namespace utils
 {
-enum TINYQUEUE_STATUS
+enum class TinyRingBufferStatus
 {
     SUCCESS = 0,
     BUFFER_EMPTY = 1,
@@ -43,10 +43,10 @@ enum TINYQUEUE_STATUS
 };
 
 template <typename T>
-class TinyQueue
+class TinyRingBuffer
 {
 public:
-    TinyQueue()
+    TinyRingBuffer()
         : m_head(0)
         , m_tail(0)
         , m_used_bytes(0)
@@ -58,21 +58,21 @@ public:
     {
     }
 
-    ~TinyQueue()
+    ~TinyRingBuffer()
     {
         free();
     }
 
-    int init(int64_t buffer_size)
+    TinyRingBufferStatus init(int64_t buffer_size)
     {
         if (buffer_size & 0xffff)
-            return INVALID_ARGUMENT;
+            return TinyRingBufferStatus::INVALID_ARGUMENT;
 
         int tries = 0;
         while (tries < 5 && m_buffer == nullptr)
         {
             m_buffer_size = buffer_size;
-            size_t virtual_size = m_buffer_size * 3;
+            size_t virtual_size = m_buffer_size * 3; // todo(markusl): why 3 and not 2 ?
             m_buffer = (uint8_t*)VirtualAlloc(nullptr, virtual_size, MEM_RESERVE, PAGE_NOACCESS);
             VirtualFree(m_buffer, 0, MEM_RELEASE);
 
@@ -98,15 +98,19 @@ public:
         }
 
         if (m_buffer == nullptr)
-            return MEMORY_ERROR;
-        return SUCCESS;
+            return TinyRingBufferStatus::MEMORY_ERROR;
+        return TinyRingBufferStatus::SUCCESS;
     }
 
-    int free()
+    TinyRingBufferStatus free()
     {
-        UnmapViewOfFile(m_map);
-        UnmapViewOfFile((uint8_t*)m_map + m_buffer_size);
-
+        bool a = UnmapViewOfFile(m_map);
+        bool b = UnmapViewOfFile((uint8_t*)m_map + m_buffer_size);
+        if (a == 0 || b == 0)
+        {
+            return TinyRingBufferStatus::MEMORY_ERROR;
+        }
+        m_map = nullptr;
         m_buffer = 0;
         m_buffer_size = 0;
         m_head = 0;
@@ -119,17 +123,45 @@ public:
             m_handle = nullptr;
         }
 
-        return SUCCESS;
+        return TinyRingBufferStatus::SUCCESS;
     }
 
-    int enqueue(const T& src)
+    // Non-thread safe ptr parameter
+    TinyRingBufferStatus allocate(int64_t elements, T** ptr)
+    {
+        T* p = nullptr;
+        if (ptr != nullptr)
+        {
+            p = data();
+        }
+
+        const int64_t byte_size = (int64_t)sizeof(T) * elements;
+        AcquireSRWLockExclusive(&m_lock);
+        if (m_used_bytes + byte_size > m_buffer_size)
+        {
+            ReleaseSRWLockExclusive(&m_lock);
+            if (ptr != nullptr)
+                *ptr = nullptr;
+            return TinyRingBufferStatus::BUFFER_FULL;
+        }
+
+        m_head = (m_head + byte_size) % m_buffer_size;
+        m_used_bytes += byte_size;
+
+        ReleaseSRWLockExclusive(&m_lock);
+        if (ptr != nullptr)
+            *ptr = p;
+        return TinyRingBufferStatus::SUCCESS;
+    }
+
+    TinyRingBufferStatus enqueue(const T& src)
     {
         const int64_t byte_size = (int64_t)sizeof(T);
         AcquireSRWLockExclusive(&m_lock);
         if (m_used_bytes + byte_size > m_buffer_size)
         {
             ReleaseSRWLockExclusive(&m_lock);
-            return BUFFER_FULL;
+            return TinyRingBufferStatus::BUFFER_FULL;
         }
 
         *reinterpret_cast<T*>(m_buffer + m_head) = src;
@@ -137,17 +169,17 @@ public:
         m_used_bytes += byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
-        return SUCCESS;
+        return TinyRingBufferStatus::SUCCESS;
     }
 
-    int enqueue(const T* src, int64_t elements)
+    TinyRingBufferStatus enqueue(const T* src, int64_t elements)
     {
         const int64_t byte_size = (int64_t)sizeof(T) * elements;
         AcquireSRWLockExclusive(&m_lock);
         if (m_used_bytes + byte_size > m_buffer_size)
         {
             ReleaseSRWLockExclusive(&m_lock);
-            return BUFFER_FULL;
+            return TinyRingBufferStatus::BUFFER_FULL;
         }
 
         for (int n = 0; n < elements; ++n)
@@ -157,10 +189,10 @@ public:
         m_used_bytes += byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
-        return SUCCESS;
+        return TinyRingBufferStatus::SUCCESS;
     }
 
-    int dequeue(T* dst)
+    TinyRingBufferStatus dequeue(T* dst)
     {
         const int64_t byte_size = (int64_t)sizeof(T);
         AcquireSRWLockExclusive(&m_lock);
@@ -168,17 +200,19 @@ public:
         if (m_used_bytes - byte_size < 0)
         {
             ReleaseSRWLockExclusive(&m_lock);
-            return BUFFER_EMPTY;
+            return TinyRingBufferStatus::BUFFER_EMPTY;
         }
         *dst = *reinterpret_cast<T*>(m_buffer + m_tail);
+        memset(m_buffer + m_tail, 0xAB, sizeof(T));
+
         m_tail = (m_tail + byte_size) % m_buffer_size;
         m_used_bytes -= byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
-        return SUCCESS;
+        return TinyRingBufferStatus::SUCCESS;
     }
 
-    int dequeue(T* dst, int64_t elements)
+    TinyRingBufferStatus dequeue(T* dst, int64_t elements)
     {
         const int64_t byte_size = (int64_t)sizeof(T) * elements;
         AcquireSRWLockExclusive(&m_lock);
@@ -190,6 +224,8 @@ public:
 
         for (int n = 0; n < elements; ++n)
             dst[n] = reinterpret_cast<T*>(m_buffer + m_head)[n];
+
+        memset(m_buffer + m_tail, 0xAB, sizeof(T) * elements);
 
         m_tail = (m_tail + byte_size) % m_buffer_size;
         m_used_bytes -= byte_size;
@@ -211,6 +247,12 @@ public:
     bool is_inited() const
     {
         return m_buffer != nullptr;
+    }
+
+    // non-thread safe access
+    T* data()
+    {
+        return reinterpret_cast<T*>(m_buffer + m_tail);
     }
 
 protected:

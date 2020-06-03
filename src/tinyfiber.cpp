@@ -24,7 +24,7 @@ SOFTWARE.
 
 #include "tinyfiber.h"
 
-#include "tinyqueue.hpp"
+#include "tinyringbuffer.hpp"
 
 #include <thread>
 #include <vector>
@@ -39,7 +39,8 @@ SOFTWARE.
 #include <Windows.h>
 #include <synchapi.h>
 
-using utils::TinyQueue;
+using utils::TinyRingBuffer;
+using utils::TinyRingBufferStatus;
 
 namespace
 {
@@ -48,8 +49,8 @@ const int MAX_NUMBER_OF_THREADS = 32;
 const int NUMBER_OF_FIBERS = 1024;
 const int FIBER_POOL_SIZE = 64 * 1024;
 const int JOB_QUEUE_SIZE = 64 * 1024;
-TinyQueue<tinyfiber::JobDeclaration> g_job_queue;
-TinyQueue<void*> g_fiber_pool;
+TinyRingBuffer<tinyfiber::JobDeclaration> g_job_queue;
+TinyRingBuffer<void*> g_fiber_pool;
 std::condition_variable g_no_job_cv;
 std::thread g_worker_threads[MAX_NUMBER_OF_THREADS];
 int g_number_of_threads;
@@ -72,10 +73,13 @@ int tinyfiber_add_job(JobDeclaration& job)
     if (job.wait_handle != nullptr)
         job.wait_handle->counter++;
 
-    int sts = g_job_queue.enqueue(job);
-    if (sts == 0)
-        g_no_job_cv.notify_one();
-    return sts;
+    TinyRingBufferStatus sts = g_job_queue.enqueue(job);
+    if (sts != TinyRingBufferStatus::SUCCESS)
+    {
+        return -1;
+    }
+    g_no_job_cv.notify_one();
+    return 0;
 }
 
 // Must have the same WaitHandler*
@@ -83,10 +87,13 @@ int tinyfiber_add_jobs(JobDeclaration jobs[], int64_t elements)
 {
     if (jobs[0].wait_handle != nullptr)
         jobs[0].wait_handle->counter += elements;
-    int sts = g_job_queue.enqueue(jobs, elements);
-    if (sts == 0)
-        g_no_job_cv.notify_all();
-    return sts;
+    TinyRingBufferStatus sts = g_job_queue.enqueue(jobs, elements);
+    if (sts != TinyRingBufferStatus::SUCCESS)
+    {
+        return -1;
+    }
+    g_no_job_cv.notify_all();
+    return 0;
 }
 
 int tinyfiber_await(WaitHandle& wait_handle)
@@ -123,7 +130,7 @@ static void fiber_main_loop(void*)
         }
 
         JobDeclaration jb;
-        if (g_job_queue.dequeue(&jb) == 0)
+        if (g_job_queue.dequeue(&jb) == TinyRingBufferStatus::SUCCESS)
         {
             jb.func(jb.user_data);
             if (jb.wait_handle != nullptr)
@@ -135,6 +142,7 @@ static void fiber_main_loop(void*)
                     if (fiber != nullptr)
                     {
                         ReleaseSRWLockExclusive(reinterpret_cast<SRWLOCK*>(&jb.wait_handle->lock));
+                        l_put_me_back = GetCurrentFiber();
                         SwitchToFiber(fiber);
                     }
                     else
@@ -163,13 +171,23 @@ int tinyfiber_run(void (*entrypoint)(void*), void* user_param, int max_threads)
     if (max_threads != ALL_CORES)
         g_number_of_threads = std::min(g_number_of_threads, max_threads);
 
+    void** allocated_fibers = nullptr;
+    if (g_fiber_pool.allocate(NUMBER_OF_FIBERS, &allocated_fibers) != TinyRingBufferStatus::SUCCESS)
+        return -1;
+
     for (int i = 0; i < NUMBER_OF_FIBERS; ++i)
     {
         void* fiber = CreateFiber(DEFAULT_STACKSIZE, fiber_main_loop, nullptr);
-        int sts = g_fiber_pool.enqueue(fiber);
-        if (sts != 0)
-            return sts;
+        if (fiber == nullptr)
+        {
+            // DWORD err = GetLastError();
+            // todo(markusl): free
+            return -1;
+        }
+        allocated_fibers[i] = fiber;
     }
+
+    void** dasd = g_fiber_pool.data();
 
     JobDeclaration jb = {entrypoint, user_param, nullptr};
     tinyfiber_add_job(jb);
@@ -187,7 +205,7 @@ int tinyfiber_run(void (*entrypoint)(void*), void* user_param, int max_threads)
             {
                 // do work
                 void* workFiber;
-                if (g_fiber_pool.dequeue(&workFiber) == 0)
+                if (g_fiber_pool.dequeue(&workFiber) == TinyRingBufferStatus::SUCCESS)
                     SwitchToFiber(workFiber);
                 g_fiber_pool.enqueue(l_put_me_back);
 
@@ -204,6 +222,7 @@ int tinyfiber_run(void (*entrypoint)(void*), void* user_param, int max_threads)
                     g_no_job_cv.wait(lk, []() { return g_should_exit || !g_job_queue.empty(); });
                 }
             }
+            ConvertFiberToThread();
         });
     }
 
@@ -211,6 +230,13 @@ int tinyfiber_run(void (*entrypoint)(void*), void* user_param, int max_threads)
     for (int i = 0; i < g_number_of_threads; ++i)
     {
         g_worker_threads[i].join();
+    }
+
+    // Delete fibers
+    void** deallocate_fibers = g_fiber_pool.data();
+    for (int i = 0; i < NUMBER_OF_FIBERS; ++i)
+    {
+        DeleteFiber(deallocate_fibers[i]);
     }
 
     g_job_queue.free();

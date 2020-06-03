@@ -1,4 +1,4 @@
-add_library(tinyfiber tinyfiber.cpp tinyfiber.h tinyqueue.hpp)
+add_library(tinyfiber tinyfiber.cpp tinyfiber.h tinyringbuffer.hpp)
 
 if (MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /GT")
