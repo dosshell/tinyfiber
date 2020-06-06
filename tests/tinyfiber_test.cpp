@@ -28,69 +28,124 @@ SOFTWARE.
 
 namespace tinyfiber
 {
-void job(void* param)
+void recursive_job(void* param)
 {
     if (param == nullptr)
         return;
 
+    const int64_t no = *(std::atomic_int64_t*)param;
     std::atomic_int64_t* depth = (std::atomic_int64_t*)param;
-
-    if (*depth == 0)
-    {
-        return;
-    }
 
     (*depth)--;
 
-    WaitHandle h;
-    JobDeclaration jd;
-    jd.func = job;
-    jd.user_data = param;
-    jd.wait_handle = &h;
+    if (*depth > 0)
+    {
+        WaitHandle wh;
+        JobDeclaration jd;
+        jd.func = recursive_job;
+        jd.user_data = param;
+        jd.wait_handle = &wh;
 
-    tinyfiber_add_job(jd);
-    tinyfiber_await(h);
+        tinyfiber_add_job(jd);
+        tinyfiber_await(wh);
+    }
+
+    int64_t d = *depth;
+    CHECK((int64_t)d == 0);
 }
 
 TEST_CASE("tinyfiber null")
 {
     // Given
+    REQUIRE(tinyfiber_init() == 0);
+
     // When
-    int sts = tinyfiber_run(nullptr, nullptr, 0);
+    int sts = tinyfiber_free();
 
     // Then
-    CHECK(sts == 0);
+    REQUIRE(sts == 0);
 }
 
-TEST_CASE("tinyfiber run")
+TEST_CASE("tinyfiber run 1 core")
 {
     //Given
+    REQUIRE(tinyfiber_init(1) == 0);
+
     std::atomic_int64_t depth = 512;
 
     //When
-    int sts = tinyfiber_run(job, &depth);
+    recursive_job(&depth);
 
     //Then
-    CHECK(sts == 0);
     CHECK(depth == 0);
+
+    // Cleanup
+    REQUIRE(tinyfiber_free() == 0);
+}
+
+TEST_CASE("tinyfiber run 3 cores")
+{
+    for (int i = 0; i < 128; ++i)
+    {
+        //Given
+        REQUIRE(tinyfiber_init(3) == 0);
+        std::atomic_int64_t depth = 3;
+
+        //When
+        depth = 3;
+        recursive_job(&depth);
+
+        //Then
+        CHECK(depth == 0);
+
+        // Cleanup
+        REQUIRE(tinyfiber_free() == 0);
+    }
 }
 
 TEST_CASE("tinyfiber mt consistency")
 {
     // Given
-    std::atomic_int64_t depth1 = 313;
-    std::atomic_int64_t depth2 = 313;
+    std::atomic_int64_t depth1 = 512;
+    std::atomic_int64_t depth2 = 512;
     int result1 = 0;
 
     // When
-    int sts1 = tinyfiber_run(job, &depth1, 1);
-    int sts2 = tinyfiber_run(job, &depth2, 2);
+    REQUIRE(tinyfiber_init(1) == 0);
+    recursive_job(&depth1);
+    REQUIRE(tinyfiber_free() == 0);
+
+    REQUIRE(tinyfiber_init(2) == 0);
+    recursive_job(&depth2);
+    REQUIRE(tinyfiber_free() == 0);
 
     // Then
-    CHECK(sts1 == 0);
-    CHECK(sts2 == 0);
     CHECK(depth1 == 0);
     CHECK(depth2 == 0);
     CHECK(depth1 == depth2);
+}
+
+void job(void* param)
+{
+    std::atomic_int64_t* depth = (std::atomic_int64_t*)param;
+
+    (*depth)--;
+
+    if (*depth > 0)
+    {
+        // Add job
+        WaitHandle wh;
+        JobDeclaration jd{job, param, &wh};
+        tinyfiber_add_job(jd);
+        tinyfiber_await(wh);
+    }
+}
+
+TEST_CASE("Example code")
+{
+    tinyfiber_init();
+    std::atomic_int64_t depth = 3;
+    job(&depth);
+    tinyfiber_free();
 }
 } // namespace tinyfiber

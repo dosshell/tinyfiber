@@ -255,6 +255,11 @@ public:
         return reinterpret_cast<T*>(m_buffer + m_tail);
     }
 
+    int64_t count() const
+    {
+        return m_used_bytes / sizeof(T);
+    }
+
 protected:
     int64_t m_head;
     int64_t m_tail;

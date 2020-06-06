@@ -42,6 +42,8 @@ SOFTWARE.
 using utils::TinyRingBuffer;
 using utils::TinyRingBufferStatus;
 
+using namespace std::chrono_literals;
+
 namespace
 {
 const int DEFAULT_STACKSIZE = 0;
@@ -53,18 +55,132 @@ TinyRingBuffer<tinyfiber::JobDeclaration> g_job_queue;
 TinyRingBuffer<void*> g_fiber_pool;
 std::condition_variable g_no_job_cv;
 std::thread g_worker_threads[MAX_NUMBER_OF_THREADS];
-int g_number_of_threads;
+int g_no_of_worker_threads;
 std::mutex g_no_job_mx;
 std::atomic_int64_t g_active_threads;
 std::atomic_bool g_should_exit;
+std::atomic<void*> g_main_fiber;
+void* g_init_fibers_fiber;
 
-thread_local void* l_primary_fiber;
-thread_local void* l_put_me_back;
-thread_local tinyfiber::WaitHandle* l_wait_handle;
+thread_local void* l_worker_fiber;
+thread_local void* l_finished_fiber;
+thread_local PSRWLOCK l_wait_handle_lock;
+thread_local int thread_number = -1;
 } // namespace
 
 namespace tinyfiber
 {
+namespace
+{
+void fiber_main_loop(void*)
+{
+    while (true)
+    {
+        // allow to resume await fiber now, after we have switched from it
+        if (l_wait_handle_lock != nullptr)
+        {
+            ReleaseSRWLockExclusive(l_wait_handle_lock);
+            l_wait_handle_lock = nullptr;
+        }
+
+        JobDeclaration jb;
+        if (g_job_queue.dequeue(&jb) == TinyRingBufferStatus::SUCCESS)
+        {
+            jb.func(jb.user_data);
+            l_finished_fiber = GetCurrentFiber();
+
+            // Take care of waiting
+            if (jb.wait_handle != nullptr)
+            {
+                AcquireSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
+
+                jb.wait_handle->counter--;
+
+                // if we are last and someone is waiting for us, yield to it
+                if (jb.wait_handle->counter == 0)
+                {
+                    void* fiber = jb.wait_handle->fiber;
+
+                    // A fiber is waiting for us
+                    if (fiber != nullptr)
+                    {
+                        jb.wait_handle->fiber = nullptr;
+                        ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock); // allow other jobs to await
+                        SwitchToFiber(fiber);                                     // yield back to awaiter fiber, await will put us back at pool
+                    }
+                    else
+                    {
+                        // No one is waiting for us
+                        ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
+                    }
+                }
+                else
+                {
+                    // We are not done yet
+                    ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
+                }
+            }
+        }
+        else
+        {
+            // There are no jobs for us, return to worker fiber
+            l_finished_fiber = GetCurrentFiber();
+            SwitchToFiber(l_worker_fiber); // worker fiber will put us back to pool
+        }
+    }
+}
+
+void worker_function()
+{
+    while (!g_should_exit)
+    {
+        void* work_fiber;
+        if (g_fiber_pool.dequeue(&work_fiber) == TinyRingBufferStatus::SUCCESS)
+        {
+            SwitchToFiber(work_fiber);
+            if (l_finished_fiber != nullptr)
+            {
+                g_fiber_pool.enqueue(l_finished_fiber);
+                l_finished_fiber = nullptr;
+            }
+            else
+            {
+                int k = 0;
+            }
+        }
+        // wait for new job or signal to exit (maybe put this first?)
+        std::unique_lock<std::mutex> lk(g_no_job_mx);
+        g_no_job_cv.wait(lk, []() { return g_should_exit || !g_job_queue.empty(); });
+    }
+}
+
+} // namespace
+
+int tinyfiber_await(WaitHandle& wait_handle)
+{
+    AcquireSRWLockExclusive((PSRWLOCK)&wait_handle.lock);
+
+    // Put this to fiber queue
+    if (wait_handle.counter == 0)
+    {
+        ReleaseSRWLockExclusive((PSRWLOCK)&wait_handle.lock);
+        return 0;
+    }
+
+    wait_handle.fiber = GetCurrentFiber();
+    l_wait_handle_lock = (PSRWLOCK)&wait_handle.lock;
+
+    void* new_fiber;
+    g_fiber_pool.dequeue(&new_fiber);
+    SwitchToFiber(new_fiber); // if there is no job, we will resume (!?!?!?) bug here?
+
+    // put back fiber we yield from to pool
+    g_fiber_pool.enqueue(l_finished_fiber);
+    l_finished_fiber = nullptr;
+
+    return 0;
+}
+
 int tinyfiber_add_job(JobDeclaration& job)
 {
     if (job.func == nullptr)
@@ -96,80 +212,49 @@ int tinyfiber_add_jobs(JobDeclaration jobs[], int64_t elements)
     return 0;
 }
 
-int tinyfiber_await(WaitHandle& wait_handle)
+void start_workers(void*)
 {
-    AcquireSRWLockExclusive(reinterpret_cast<SRWLOCK*>(&wait_handle.lock));
-    // Put this to fiber queue
-    if (wait_handle.counter == 0)
+    // First worker will start with main fiber
+    g_worker_threads[0] = std::thread([] {
+        l_worker_fiber = ConvertThreadToFiber(nullptr);
+        SwitchToFiber(g_main_fiber);
+        if (l_finished_fiber != nullptr)
+            g_fiber_pool.enqueue(l_finished_fiber);
+        l_finished_fiber = nullptr;
+        worker_function();
+        ConvertFiberToThread();
+    });
+
+    // Other workers will start with worker_function
+    for (int i = 1; i < g_no_of_worker_threads; ++i)
     {
-        ReleaseSRWLockExclusive(reinterpret_cast<SRWLOCK*>(&wait_handle.lock));
-        return 0;
+        g_worker_threads[i] = std::thread([] {
+            l_worker_fiber = ConvertThreadToFiber(nullptr);
+            worker_function();
+            ConvertFiberToThread();
+        });
     }
 
-    wait_handle.fiber = GetCurrentFiber();
-    l_wait_handle = &wait_handle;
-
-    void* new_fiber;
-    g_fiber_pool.dequeue(&new_fiber);
-    SwitchToFiber(new_fiber);
-
-    g_fiber_pool.enqueue(l_put_me_back);
-    l_put_me_back = nullptr;
-
-    return 0;
-}
-
-static void fiber_main_loop(void*)
-{
-    while (true)
+    // Wait for worker threads to exit
+    for (int i = 0; i < g_no_of_worker_threads; ++i)
     {
-        if (l_wait_handle != nullptr)
-        {
-            ReleaseSRWLockExclusive(reinterpret_cast<SRWLOCK*>(&l_wait_handle->lock));
-            l_wait_handle = nullptr;
-        }
-
-        JobDeclaration jb;
-        if (g_job_queue.dequeue(&jb) == TinyRingBufferStatus::SUCCESS)
-        {
-            jb.func(jb.user_data);
-            if (jb.wait_handle != nullptr)
-            {
-                if (--(jb.wait_handle->counter) == 0)
-                {
-                    AcquireSRWLockExclusive(reinterpret_cast<SRWLOCK*>(&jb.wait_handle->lock));
-                    void* fiber = jb.wait_handle->fiber;
-                    if (fiber != nullptr)
-                    {
-                        ReleaseSRWLockExclusive(reinterpret_cast<SRWLOCK*>(&jb.wait_handle->lock));
-                        l_put_me_back = GetCurrentFiber();
-                        SwitchToFiber(fiber);
-                    }
-                    else
-                    {
-                        ReleaseSRWLockExclusive(reinterpret_cast<SRWLOCK*>(&jb.wait_handle->lock));
-                    }
-                }
-            }
-        }
-        else
-        {
-            l_put_me_back = GetCurrentFiber();
-            SwitchToFiber(l_primary_fiber);
-        }
+        g_worker_threads[i].join();
     }
+    SwitchToFiber(g_main_fiber);
 }
 
-int tinyfiber_run(void (*entrypoint)(void*), void* user_param, int max_threads)
+int tinyfiber_init(int max_threads)
 {
+    // Init pools etc.
     g_job_queue.init(JOB_QUEUE_SIZE);
     g_fiber_pool.init(FIBER_POOL_SIZE);
 
-    g_number_of_threads = std::thread::hardware_concurrency();
-    g_number_of_threads = std::min(g_number_of_threads, MAX_NUMBER_OF_THREADS);
+    // -1 since main thread counts
+    g_no_of_worker_threads = std::thread::hardware_concurrency();
+    g_no_of_worker_threads = std::min(g_no_of_worker_threads, MAX_NUMBER_OF_THREADS);
 
     if (max_threads != ALL_CORES)
-        g_number_of_threads = std::min(g_number_of_threads, max_threads);
+        g_no_of_worker_threads = std::min(g_no_of_worker_threads, max_threads);
 
     void** allocated_fibers = nullptr;
     if (g_fiber_pool.allocate(NUMBER_OF_FIBERS, &allocated_fibers) != TinyRingBufferStatus::SUCCESS)
@@ -187,60 +272,32 @@ int tinyfiber_run(void (*entrypoint)(void*), void* user_param, int max_threads)
         allocated_fibers[i] = fiber;
     }
 
-    void** dasd = g_fiber_pool.data();
+    // Switch away from main thread and start worker system
+    g_main_fiber = ConvertThreadToFiber(nullptr);
+    g_init_fibers_fiber = CreateFiber(DEFAULT_STACKSIZE, start_workers, nullptr);
+    SwitchToFiber(g_init_fibers_fiber); // Lose main thread
+    // Worker thread will execute from here now
+    return 0;
+}
 
-    JobDeclaration jb = {entrypoint, user_param, nullptr};
-    tinyfiber_add_job(jb);
+// Must be called from main fiber (eg, from no job)
+int tinyfiber_free()
+{
+    g_should_exit = true;
+    g_no_job_cv.notify_all();
 
-    g_active_threads = g_number_of_threads;
-    g_should_exit = false;
+    SwitchToFiber(l_worker_fiber);
 
-    for (int i = 0; i < g_number_of_threads; ++i)
-    {
-        g_worker_threads[i] = std::thread([] {
-            l_primary_fiber = ConvertThreadToFiber(nullptr);
-            l_wait_handle = nullptr;
-
-            while (!g_should_exit)
-            {
-                // do work
-                void* workFiber;
-                if (g_fiber_pool.dequeue(&workFiber) == TinyRingBufferStatus::SUCCESS)
-                    SwitchToFiber(workFiber);
-                g_fiber_pool.enqueue(l_put_me_back);
-
-                // wait for new job or signal exit if last one alive
-                std::unique_lock<std::mutex> lk(g_no_job_mx);
-                int64_t threadsLeft = --g_active_threads;
-                if (threadsLeft == 0)
-                {
-                    g_should_exit = true;
-                    g_no_job_cv.notify_all();
-                }
-                else
-                {
-                    g_no_job_cv.wait(lk, []() { return g_should_exit || !g_job_queue.empty(); });
-                }
-            }
-            ConvertFiberToThread();
-        });
-    }
-
-    // Free system
-    for (int i = 0; i < g_number_of_threads; ++i)
-    {
-        g_worker_threads[i].join();
-    }
+    ConvertFiberToThread();
 
     // Delete fibers
+    DeleteFiber(g_init_fibers_fiber);
     void** deallocate_fibers = g_fiber_pool.data();
     for (int i = 0; i < NUMBER_OF_FIBERS; ++i)
-    {
         DeleteFiber(deallocate_fibers[i]);
-    }
-
-    g_job_queue.free();
     g_fiber_pool.free();
+    g_job_queue.free();
+
     return 0;
 }
 

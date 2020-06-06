@@ -45,8 +45,9 @@ struct JobDeclaration
     WaitHandle* wait_handle;
 };
 
-const int ALL_CORES = 0;
-int tinyfiber_run(void (*entrypoint)(void*), void* user_param, int max_threads = ALL_CORES);
+const int ALL_CORES{0};
+int tinyfiber_init(int max_threads = ALL_CORES);
+int tinyfiber_free();
 int tinyfiber_add_job(JobDeclaration& job_declaration);
 int tinyfiber_add_jobs(JobDeclaration jobs[], int64_t elements);
 int tinyfiber_await(WaitHandle& wait_handle);
