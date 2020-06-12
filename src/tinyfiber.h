@@ -27,29 +27,41 @@ SOFTWARE.
 
 namespace tinyfiber
 {
-class WaitHandle
+struct FiberSystem;
+
+typedef struct
 {
-public:
-    WaitHandle() : counter(0), fiber(nullptr), lock(nullptr)
-    {
-    }
     void* fiber;
     std::atomic_int64_t counter;
     void* lock;
-};
+} WaitHandle;
 
-struct JobDeclaration
+typedef struct
 {
     void (*func)(void*);
     void* user_data;
     WaitHandle* wait_handle;
-};
+} JobDeclaration;
 
-const int ALL_CORES{0};
-int tinyfiber_init(int max_threads = ALL_CORES);
-int tinyfiber_free();
-int tinyfiber_add_job(JobDeclaration& job_declaration);
-int tinyfiber_add_jobs(JobDeclaration jobs[], int64_t elements);
-int tinyfiber_await(WaitHandle& wait_handle);
+const int ALL_CORES = 0;
+FiberSystem* const MY_FIBER_SYSTEM = nullptr;
+
+int tinyfiber_init(FiberSystem** fiber_system, int max_threads = ALL_CORES);
+int tinyfiber_free(FiberSystem** fiber_system);
+int tinyfiber_add_job(FiberSystem* fiber_system, JobDeclaration& job_declaration);
+inline int tinyfiber_add_job(JobDeclaration& job_declaration)
+{
+    return tinyfiber_add_job(MY_FIBER_SYSTEM, job_declaration);
+}
+int tinyfiber_add_jobs(FiberSystem* fiber_system, JobDeclaration jobs[], int64_t elements);
+inline int tinyfiber_add_jobs(JobDeclaration jobs[], int64_t elements)
+{
+    return tinyfiber_add_jobs(MY_FIBER_SYSTEM, jobs, elements);
+}
+int tinyfiber_await(FiberSystem* fiber_system, WaitHandle& wait_handle);
+inline int tinyfiber_await(WaitHandle& wait_handle)
+{
+    return tinyfiber_await(MY_FIBER_SYSTEM, wait_handle);
+}
 
 } // namespace tinyfiber

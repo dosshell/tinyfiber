@@ -57,10 +57,11 @@ void recursive_job(void* param)
 TEST_CASE("tinyfiber null")
 {
     // Given
-    REQUIRE(tinyfiber_init() == 0);
+    FiberSystem* fs;
+    REQUIRE(tinyfiber_init(&fs) == 0);
 
     // When
-    int sts = tinyfiber_free();
+    int sts = tinyfiber_free(&fs);
 
     // Then
     REQUIRE(sts == 0);
@@ -69,7 +70,8 @@ TEST_CASE("tinyfiber null")
 TEST_CASE("tinyfiber run 1 core")
 {
     //Given
-    REQUIRE(tinyfiber_init(1) == 0);
+    FiberSystem* fs;
+    REQUIRE(tinyfiber_init(&fs, 1) == 0);
 
     std::atomic_int64_t depth = 512;
 
@@ -80,7 +82,7 @@ TEST_CASE("tinyfiber run 1 core")
     CHECK(depth == 0);
 
     // Cleanup
-    REQUIRE(tinyfiber_free() == 0);
+    REQUIRE(tinyfiber_free(&fs) == 0);
 }
 
 TEST_CASE("tinyfiber run 3 cores")
@@ -88,7 +90,8 @@ TEST_CASE("tinyfiber run 3 cores")
     for (int i = 0; i < 128; ++i)
     {
         //Given
-        REQUIRE(tinyfiber_init(3) == 0);
+        FiberSystem* fs;
+        REQUIRE(tinyfiber_init(&fs, 3) == 0);
         std::atomic_int64_t depth = 3;
 
         //When
@@ -99,7 +102,7 @@ TEST_CASE("tinyfiber run 3 cores")
         CHECK(depth == 0);
 
         // Cleanup
-        REQUIRE(tinyfiber_free() == 0);
+        REQUIRE(tinyfiber_free(&fs) == 0);
     }
 }
 
@@ -111,13 +114,14 @@ TEST_CASE("tinyfiber mt consistency")
     int result1 = 0;
 
     // When
-    REQUIRE(tinyfiber_init(1) == 0);
+    FiberSystem* fs;
+    REQUIRE(tinyfiber_init(&fs, 1) == 0);
     recursive_job(&depth1);
-    REQUIRE(tinyfiber_free() == 0);
+    REQUIRE(tinyfiber_free(&fs) == 0);
 
-    REQUIRE(tinyfiber_init(2) == 0);
+    REQUIRE(tinyfiber_init(&fs, 2) == 0);
     recursive_job(&depth2);
-    REQUIRE(tinyfiber_free() == 0);
+    REQUIRE(tinyfiber_free(&fs) == 0);
 
     // Then
     CHECK(depth1 == 0);
@@ -143,9 +147,10 @@ void job(void* param)
 
 TEST_CASE("Example code")
 {
-    tinyfiber_init();
+    FiberSystem* fs;
+    tinyfiber_init(&fs);
     std::atomic_int64_t depth = 3;
     job(&depth);
-    tinyfiber_free();
+    tinyfiber_free(&fs);
 }
 } // namespace tinyfiber
