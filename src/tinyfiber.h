@@ -25,43 +25,60 @@ SOFTWARE.
 #pragma once
 #include <atomic>
 
-namespace tinyfiber
+#ifdef __cplusplus
+extern "C"
 {
-struct FiberSystem;
+#endif
 
-typedef struct
-{
-    void* fiber;
-    std::atomic_int64_t counter;
-    void* lock;
-} WaitHandle;
+    struct TfbContext;
 
-typedef struct
-{
-    void (*func)(void*);
-    void* user_data;
-    WaitHandle* wait_handle;
-} JobDeclaration;
+    typedef struct
+    {
+        void* fiber;
+        std::atomic_int64_t counter;
+        void* lock;
+    } TfbWaitHandle;
 
-const int ALL_CORES = 0;
-FiberSystem* const MY_FIBER_SYSTEM = nullptr;
+    typedef struct
+    {
+        void (*func)(void*);
+        void* user_data;
+        TfbWaitHandle* wait_handle;
+    } TfbJobDeclaration;
 
-int tinyfiber_init(FiberSystem** fiber_system, int max_threads = ALL_CORES);
-int tinyfiber_free(FiberSystem** fiber_system);
-int tinyfiber_add_job(FiberSystem* fiber_system, JobDeclaration& job_declaration);
-inline int tinyfiber_add_job(JobDeclaration& job_declaration)
-{
-    return tinyfiber_add_job(MY_FIBER_SYSTEM, job_declaration);
+    const int TFB_ALL_CORES = 0;
+    struct TfbContext* const TFB_MY_CONTEXT = nullptr;
+
+    int tfb_init_ext(TfbContext** fiber_system, int max_threads);
+
+    inline int tfb_init(TfbContext** fiber_system)
+    {
+        return tfb_init_ext(fiber_system, TFB_ALL_CORES);
+    }
+
+    int tfb_free(TfbContext** fiber_system);
+
+    int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration& job_declaration);
+
+    inline int tfb_add_job(TfbJobDeclaration& job_declaration)
+    {
+        return tfb_add_job_ext(TFB_MY_CONTEXT, job_declaration);
+    }
+
+    int tfb_add_jobs_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements);
+
+    inline int tfb_add_jobs(TfbJobDeclaration jobs[], int64_t elements)
+    {
+        return tfb_add_jobs_ext(TFB_MY_CONTEXT, jobs, elements);
+    }
+
+    int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle& wait_handle);
+
+    inline int tfb_await(TfbWaitHandle& wait_handle)
+    {
+        return tfb_await_ext(TFB_MY_CONTEXT, wait_handle);
+    }
+
+#ifdef __cplusplus
 }
-int tinyfiber_add_jobs(FiberSystem* fiber_system, JobDeclaration jobs[], int64_t elements);
-inline int tinyfiber_add_jobs(JobDeclaration jobs[], int64_t elements)
-{
-    return tinyfiber_add_jobs(MY_FIBER_SYSTEM, jobs, elements);
-}
-int tinyfiber_await(FiberSystem* fiber_system, WaitHandle& wait_handle);
-inline int tinyfiber_await(WaitHandle& wait_handle)
-{
-    return tinyfiber_await(MY_FIBER_SYSTEM, wait_handle);
-}
-
-} // namespace tinyfiber
+#endif
