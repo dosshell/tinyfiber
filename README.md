@@ -9,10 +9,10 @@ void job(void* param);
 
 int main(int argc, const char* argv[])
 {
-    tinyfiber_init();
+    tfb_init();
     std::atomic_int64_t depth = 3;
     job(&depth);
-    tinyfiber_free();
+    tfb_free();
 }
 
 void job(void* param)
@@ -24,10 +24,10 @@ void job(void* param)
     if (*depth > 0)
     {
         // Add job
-        WaitHandle wh;
-        JobDeclaration jd{job, param, &wh};
-        tinyfiber_add_job(jd);
-        tinyfiber_await(wh);
+        TfbWaitHandle wh;
+        TfbJobDeclaration jd{job, param, &wh};
+        tfb_add_job(jd);
+        tfb_await(wh);
     }
 }
 ```
