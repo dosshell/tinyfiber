@@ -25,6 +25,7 @@ SOFTWARE.
 #include <tinyfiber.h>
 
 #include "doctest.hpp"
+#include <atomic>
 
 namespace tinyfiber
 {
@@ -40,7 +41,7 @@ void recursive_job(void* param)
 
     if (*depth > 0)
     {
-        TfbWaitHandle wh;
+        TfbWaitHandle wh{};
         TfbJobDeclaration jd;
         jd.func = recursive_job;
         jd.user_data = param;
@@ -138,7 +139,7 @@ void job(void* param)
     if (*depth > 0)
     {
         // Add job
-        TfbWaitHandle wh;
+        TfbWaitHandle wh{};
         TfbJobDeclaration jd{job, param, &wh};
         tfb_add_job(jd);
         tfb_await(wh);

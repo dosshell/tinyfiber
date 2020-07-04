@@ -55,9 +55,9 @@ struct TfbContext
     std::condition_variable no_job_cv;
     std::thread worker_threads[TFB_MAX_NUMBER_OF_THREADS];
     int no_of_worker_threads = 0;
-    std::mutex no_job_mx;
-    std::atomic_int64_t active_threads;
     std::atomic_bool should_exit;
+    std::mutex pending_jobs_mx;
+    std::atomic_int64_t pending_jobs_count;
     std::atomic<void*> main_fiber;
     void* init_fibers_fiber = nullptr;
 
@@ -90,8 +90,13 @@ static void fiber_main_loop(void* fiber_system)
         }
 
         TfbJobDeclaration jb;
-        if (fs.job_queue.dequeue(&jb) == TinyRingBufferStatus::SUCCESS)
+        if (!fs.should_exit && fs.job_queue.dequeue(&jb) == TinyRingBufferStatus::SUCCESS)
         {
+            {
+                std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
+                --fs.pending_jobs_count;
+            }
+
             jb.func(jb.user_data);
             fs.l_finished_fiber = GetCurrentFiber();
 
@@ -100,10 +105,10 @@ static void fiber_main_loop(void* fiber_system)
             {
                 AcquireSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
 
-                jb.wait_handle->counter--;
+                reinterpret_cast<std::atomic_int64_t&>(jb.wait_handle->counter)--;
 
                 // if we are last and someone is waiting for us, yield to it
-                if (jb.wait_handle->counter == 0)
+                if (reinterpret_cast<std::atomic_int64_t&>(jb.wait_handle->counter).load() == 0)
                 {
                     void* fiber = jb.wait_handle->fiber;
 
@@ -116,32 +121,34 @@ static void fiber_main_loop(void* fiber_system)
                     }
                     else
                     {
-                        // No one is waiting for us
+                        // No one is awaiting for us
                         ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
                     }
                 }
                 else
                 {
-                    // We are not done yet
+                    // There may be more jobs for us
                     ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
                 }
             }
         }
         else
         {
-            // There are no jobs for us, return to worker fiber
+            // There are no jobs for us or exit is requested, return to worker fiber whom can block us
             fs.l_finished_fiber = GetCurrentFiber();
             SwitchToFiber(fs.l_worker_fiber); // worker fiber will put us back to pool
         }
     }
 }
 
-static void worker_function(TfbContext& fs)
+static int worker_function(TfbContext& fs)
 {
     while (!fs.should_exit)
     {
         void* work_fiber;
-        if (fs.fiber_pool.dequeue(&work_fiber) == TinyRingBufferStatus::SUCCESS)
+        TinyRingBufferStatus sts = fs.fiber_pool.dequeue(&work_fiber);
+
+        if (sts == TinyRingBufferStatus::SUCCESS)
         {
             SwitchToFiber(work_fiber);
             if (fs.l_finished_fiber != nullptr)
@@ -150,10 +157,17 @@ static void worker_function(TfbContext& fs)
                 fs.l_finished_fiber = nullptr;
             }
         }
-        // wait for new job or signal to exit (maybe put this first?)
-        std::unique_lock<std::mutex> lk(fs.no_job_mx);
-        fs.no_job_cv.wait(lk, [&fs]() { return fs.should_exit || !fs.job_queue.empty(); });
+        else if (sts == TinyRingBufferStatus::BUFFER_EMPTY)
+        {
+            std::unique_lock<std::mutex> lk(fs.pending_jobs_mx);
+            fs.no_job_cv.wait(lk, [&] { return fs.pending_jobs_count > 0 || fs.should_exit; });
+        }
+        else
+        {
+            return -1; // no more fibers in the pool
+        }
     }
+    return 0;
 }
 
 static void start_workers(void* fiber_system)
@@ -162,7 +176,7 @@ static void start_workers(void* fiber_system)
         return;
 
     TfbContext& fs = *(TfbContext*)fiber_system;
-    // First worker will start with main fiber
+    // First worker will start at main fiber
     fs.worker_threads[0] = std::thread([&fs] {
         l_my_fiber_system = &fs;
         fs.l_worker_fiber = ConvertThreadToFiber(nullptr);
@@ -170,7 +184,6 @@ static void start_workers(void* fiber_system)
         if (fs.l_finished_fiber != nullptr)
             fs.fiber_pool.enqueue(fs.l_finished_fiber);
         fs.l_finished_fiber = nullptr;
-        worker_function(fs);
         ConvertFiberToThread();
     });
 
@@ -180,7 +193,7 @@ static void start_workers(void* fiber_system)
         fs.worker_threads[i] = std::thread([&fs] {
             l_my_fiber_system = &fs;
             fs.l_worker_fiber = ConvertThreadToFiber(nullptr);
-            worker_function(fs);
+            worker_function(fs); // todo(markusl): handle return error code
             ConvertFiberToThread();
         });
     }
@@ -233,7 +246,7 @@ int tfb_init_ext(TfbContext** fiber_system, int max_threads)
     // Switch away from main thread and start worker system
     fs.main_fiber = ConvertThreadToFiber(nullptr);
     fs.init_fibers_fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, start_workers, &fs);
-    SwitchToFiber(fs.init_fibers_fiber); // Lose main thread
+    SwitchToFiber(fs.init_fibers_fiber); // Lose main fiber from main thread
     // Worker thread will execute from here now
     return 0;
 }
@@ -248,7 +261,11 @@ int tfb_free(TfbContext** fiber_system)
 
     TfbContext& fs = **fiber_system;
 
-    fs.should_exit = true;
+    {
+        std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
+        fs.should_exit = true;
+    }
+
     fs.no_job_cv.notify_all();
 
     SwitchToFiber(fs.l_worker_fiber);
@@ -277,15 +294,21 @@ int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration& job)
     if (fiber_system == TFB_MY_CONTEXT)
         fiber_system = l_my_fiber_system;
 
-    if (job.wait_handle != nullptr)
-        job.wait_handle->counter++;
+    TfbContext& fs = *(TfbContext*)fiber_system;
 
-    TinyRingBufferStatus sts = fiber_system->job_queue.enqueue(job);
+    if (job.wait_handle != nullptr)
+        reinterpret_cast<std::atomic_int64_t&>(job.wait_handle->counter)++;
+
+    TinyRingBufferStatus sts = fs.job_queue.enqueue(job);
     if (sts != TinyRingBufferStatus::SUCCESS)
-    {
         return -1;
+
+    {
+        std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
+        ++fs.pending_jobs_count;
     }
-    fiber_system->no_job_cv.notify_one();
+    fs.no_job_cv.notify_one();
+
     return 0;
 }
 
@@ -295,14 +318,20 @@ int tfb_add_jobs_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t
     if (fiber_system == TFB_MY_CONTEXT)
         fiber_system = l_my_fiber_system;
 
+    TfbContext& fs = *(TfbContext*)fiber_system;
+
     if (jobs[0].wait_handle != nullptr)
-        jobs[0].wait_handle->counter += elements;
-    TinyRingBufferStatus sts = fiber_system->job_queue.enqueue(jobs, elements);
-    if (sts != TinyRingBufferStatus::SUCCESS)
-    {
+        reinterpret_cast<std::atomic_int64_t&>(jobs[0].wait_handle->counter) += elements;
+
+    if (fs.job_queue.enqueue(jobs, elements) != TinyRingBufferStatus::SUCCESS)
         return -1;
+
+    {
+        std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
+        fs.pending_jobs_count += elements;
     }
-    fiber_system->no_job_cv.notify_all();
+    fs.no_job_cv.notify_all();
+
     return 0;
 }
 
@@ -311,25 +340,32 @@ int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle& wait_handle)
     if (fiber_system == TFB_MY_CONTEXT)
         fiber_system = l_my_fiber_system;
 
+    TfbContext& fs = *(TfbContext*)fiber_system;
+
     AcquireSRWLockExclusive((PSRWLOCK)&wait_handle.lock);
 
     // Put this to fiber queue
-    if (wait_handle.counter == 0)
+    if (reinterpret_cast<std::atomic_int64_t&>(wait_handle.counter).load() == 0)
     {
         ReleaseSRWLockExclusive((PSRWLOCK)&wait_handle.lock);
         return 0;
     }
 
     wait_handle.fiber = GetCurrentFiber();
-    fiber_system->l_wait_handle_lock = (PSRWLOCK)&wait_handle.lock;
+    fs.l_wait_handle_lock = (PSRWLOCK)&wait_handle.lock;
 
     void* new_fiber;
-    fiber_system->fiber_pool.dequeue(&new_fiber);
-    SwitchToFiber(new_fiber); // if there is no job, we will resume (!?!?!?) bug here?
-
-    // put back fiber we yield from to pool
-    fiber_system->fiber_pool.enqueue(fiber_system->l_finished_fiber);
-    fiber_system->l_finished_fiber = nullptr;
+    if (fs.fiber_pool.dequeue(&new_fiber) == TinyRingBufferStatus::SUCCESS)
+    {
+        SwitchToFiber(new_fiber);
+        // put back fiber we yield from to pool
+        fs.fiber_pool.enqueue(fs.l_finished_fiber);
+        fs.l_finished_fiber = nullptr;
+    }
+    else
+    {
+        return -1;
+    }
 
     return 0;
 }

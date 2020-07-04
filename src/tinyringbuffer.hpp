@@ -30,6 +30,7 @@ SOFTWARE.
 #include <stdint.h>
 #include <Windows.h>
 #include <synchapi.h>
+#include <atomic>
 
 namespace utils
 {
@@ -263,7 +264,7 @@ public:
 protected:
     int64_t m_head;
     int64_t m_tail;
-    int64_t m_used_bytes;
+    std::atomic_int64_t m_used_bytes;
     int64_t m_buffer_size;
     uint8_t* m_buffer;
 

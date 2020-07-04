@@ -23,7 +23,7 @@ SOFTWARE.
 */
 
 #pragma once
-#include <atomic>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C"
@@ -32,10 +32,11 @@ extern "C"
 
     struct TfbContext;
 
+    // Internal structure, init to zero to use.
     typedef struct
     {
         void* fiber;
-        std::atomic_int64_t counter;
+        int64_t counter; // rw will result in UF
         void* lock;
     } TfbWaitHandle;
 

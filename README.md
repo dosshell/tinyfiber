@@ -24,7 +24,7 @@ void job(void* param)
     if (*depth > 0)
     {
         // Add job
-        TfbWaitHandle wh;
+        TfbWaitHandle wh{};
         TfbJobDeclaration jd{job, param, &wh};
         tfb_add_job(jd);
         tfb_await(wh);
