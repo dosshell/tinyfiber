@@ -254,9 +254,7 @@ int tfb_init_ext(TfbContext** fiber_system, int max_threads)
 // Must be called from main fiber (eg, from no job)
 int tfb_free(TfbContext** fiber_system)
 {
-    if (fiber_system == nullptr)
-        return -1;
-    if (*fiber_system == nullptr)
+    if (fiber_system == nullptr || *fiber_system == nullptr)
         return -1;
 
     TfbContext& fs = **fiber_system;
@@ -286,20 +284,20 @@ int tfb_free(TfbContext** fiber_system)
     return 0;
 }
 
-int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration& job)
+int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration* job)
 {
-    if (job.func == nullptr)
+    if (job == nullptr)
+        return -1;
+
+    if (job->func == nullptr)
         return 0;
 
-    if (fiber_system == TFB_MY_CONTEXT)
-        fiber_system = l_my_fiber_system;
+    TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
-    TfbContext& fs = *(TfbContext*)fiber_system;
+    if (job->wait_handle != nullptr)
+        reinterpret_cast<std::atomic_int64_t&>(job->wait_handle->counter)++;
 
-    if (job.wait_handle != nullptr)
-        reinterpret_cast<std::atomic_int64_t&>(job.wait_handle->counter)++;
-
-    TinyRingBufferStatus sts = fs.job_queue.enqueue(job);
+    TinyRingBufferStatus sts = fs.job_queue.enqueue(*job);
     if (sts != TinyRingBufferStatus::SUCCESS)
         return -1;
 
@@ -315,10 +313,7 @@ int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration& job)
 // Must have the same WaitHandler*
 int tfb_add_jobs_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements)
 {
-    if (fiber_system == TFB_MY_CONTEXT)
-        fiber_system = l_my_fiber_system;
-
-    TfbContext& fs = *(TfbContext*)fiber_system;
+    TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
     if (jobs[0].wait_handle != nullptr)
         reinterpret_cast<std::atomic_int64_t&>(jobs[0].wait_handle->counter) += elements;
@@ -335,24 +330,24 @@ int tfb_add_jobs_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t
     return 0;
 }
 
-int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle& wait_handle)
+int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle* wait_handle)
 {
-    if (fiber_system == TFB_MY_CONTEXT)
-        fiber_system = l_my_fiber_system;
+    if (wait_handle == nullptr)
+        return -1;
 
-    TfbContext& fs = *(TfbContext*)fiber_system;
+    TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
-    AcquireSRWLockExclusive((PSRWLOCK)&wait_handle.lock);
+    AcquireSRWLockExclusive((PSRWLOCK)&wait_handle->lock);
 
     // Put this to fiber queue
-    if (reinterpret_cast<std::atomic_int64_t&>(wait_handle.counter).load() == 0)
+    if (reinterpret_cast<std::atomic_int64_t&>(wait_handle->counter).load() == 0)
     {
-        ReleaseSRWLockExclusive((PSRWLOCK)&wait_handle.lock);
+        ReleaseSRWLockExclusive((PSRWLOCK)&wait_handle->lock);
         return 0;
     }
 
-    wait_handle.fiber = GetCurrentFiber();
-    fs.l_wait_handle_lock = (PSRWLOCK)&wait_handle.lock;
+    wait_handle->fiber = GetCurrentFiber();
+    fs.l_wait_handle_lock = (PSRWLOCK)&wait_handle->lock;
 
     void* new_fiber;
     if (fs.fiber_pool.dequeue(&new_fiber) == TinyRingBufferStatus::SUCCESS)

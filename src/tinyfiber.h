@@ -24,13 +24,13 @@ SOFTWARE.
 
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
-
-    struct TfbContext;
+    typedef struct TfbContext TfbContext;
 
     // Internal structure, init to zero to use.
     typedef struct
@@ -48,7 +48,7 @@ extern "C"
     } TfbJobDeclaration;
 
     const int TFB_ALL_CORES = 0;
-    struct TfbContext* const TFB_MY_CONTEXT = nullptr;
+    TfbContext* const TFB_MY_CONTEXT = NULL;
 
     int tfb_init_ext(TfbContext** fiber_system, int max_threads);
 
@@ -59,9 +59,9 @@ extern "C"
 
     int tfb_free(TfbContext** fiber_system);
 
-    int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration& job_declaration);
+    int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration* job_declaration);
 
-    inline int tfb_add_job(TfbJobDeclaration& job_declaration)
+    inline int tfb_add_job(TfbJobDeclaration* job_declaration)
     {
         return tfb_add_job_ext(TFB_MY_CONTEXT, job_declaration);
     }
@@ -73,9 +73,9 @@ extern "C"
         return tfb_add_jobs_ext(TFB_MY_CONTEXT, jobs, elements);
     }
 
-    int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle& wait_handle);
+    int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle* wait_handle);
 
-    inline int tfb_await(TfbWaitHandle& wait_handle)
+    inline int tfb_await(TfbWaitHandle* wait_handle)
     {
         return tfb_await_ext(TFB_MY_CONTEXT, wait_handle);
     }
