@@ -25,8 +25,7 @@ void job(void* param)
     {
         // Add job
         TfbWaitHandle wh{};
-        TfbJobDeclaration jd{job, param, &wh};
-        tfb_add_job(&jd);
+        tfb_add_job(job, param, &wh);
         tfb_await(&wh);
     }
 }

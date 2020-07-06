@@ -64,18 +64,30 @@ extern "C"
         return tfb_free_ext(NULL);
     }
 
-    int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration* job_declaration);
+    int tfb_add_jobdecl_ext(TfbContext* fiber_system, TfbJobDeclaration* job_declaration);
 
-    inline int tfb_add_job(TfbJobDeclaration* job_declaration)
+    inline int tfb_add_jobdecl(TfbJobDeclaration* job_declaration)
     {
-        return tfb_add_job_ext(TFB_MY_CONTEXT, job_declaration);
+        return tfb_add_jobdecl_ext(TFB_MY_CONTEXT, job_declaration);
     }
 
-    int tfb_add_jobs_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements);
+    int tfb_add_jobdecls_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements);
 
-    inline int tfb_add_jobs(TfbJobDeclaration jobs[], int64_t elements)
+    inline int tfb_add_jobdecls(TfbJobDeclaration jobs[], int64_t elements)
     {
-        return tfb_add_jobs_ext(TFB_MY_CONTEXT, jobs, elements);
+        return tfb_add_jobdecls_ext(TFB_MY_CONTEXT, jobs, elements);
+    }
+
+    inline int tfb_add_job_ext(TfbContext* fiber_system, void (*func)(void*), void* user_data, TfbWaitHandle* wh)
+    {
+        TfbJobDeclaration job{func, user_data, wh};
+        return tfb_add_jobdecl_ext(fiber_system, &job);
+    }
+
+    inline int tfb_add_job(void (*func)(void*), void* user_data, TfbWaitHandle* wh)
+    {
+        TfbJobDeclaration job{func, user_data, wh};
+        return tfb_add_jobdecl(&job);
     }
 
     int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle* wait_handle);

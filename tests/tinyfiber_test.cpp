@@ -48,7 +48,7 @@ void recursive_job(void* param)
         jd.user_data = param;
         jd.wait_handle = &wh;
 
-        tfb_add_job(&jd);
+        tfb_add_jobdecl(&jd);
         tfb_await(&wh);
     }
 
@@ -174,8 +174,7 @@ void job(void* param)
     {
         // Add job
         TfbWaitHandle wh{};
-        TfbJobDeclaration jd{job, param, &wh};
-        tfb_add_job(&jd);
+        tfb_add_job(job, param, &wh);
         tfb_await(&wh);
     }
 }

@@ -117,7 +117,7 @@ static void fiber_main_loop(void* fiber_system)
                     {
                         jb.wait_handle->_fiber = nullptr;
                         ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock); // allow other jobs to await
-                        SwitchToFiber(fiber);                                      // yield back to awaiter fiber, await will put us back at pool
+                        SwitchToFiber(fiber);                                     // yield back to awaiter fiber, await will put us back at pool
                     }
                     else
                     {
@@ -289,7 +289,7 @@ int tfb_free_ext(TfbContext** fiber_system)
     return 0;
 }
 
-int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration* job)
+int tfb_add_jobdecl_ext(TfbContext* fiber_system, TfbJobDeclaration* job)
 {
     if (job == nullptr)
         return -1;
@@ -316,7 +316,7 @@ int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration* job)
 }
 
 // Must have the same WaitHandler*
-int tfb_add_jobs_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements)
+int tfb_add_jobdecls_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements)
 {
     TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
