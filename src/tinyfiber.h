@@ -32,12 +32,12 @@ extern "C"
 #endif
     typedef struct TfbContext TfbContext;
 
-    // Internal structure, init to zero to use.
+    // Internal structure, init to zero to use. Writes will result in UF
     typedef struct
     {
-        void* fiber;
-        int64_t counter; // rw will result in UF
-        void* lock;
+        void* _fiber;
+        int64_t _counter;
+        void* _lock;
     } TfbWaitHandle;
 
     typedef struct

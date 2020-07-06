@@ -103,32 +103,32 @@ static void fiber_main_loop(void* fiber_system)
             // Take care of waiting
             if (jb.wait_handle != nullptr)
             {
-                AcquireSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
+                AcquireSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock);
 
-                reinterpret_cast<std::atomic_int64_t&>(jb.wait_handle->counter)--;
+                reinterpret_cast<std::atomic_int64_t&>(jb.wait_handle->_counter)--;
 
                 // if we are last and someone is waiting for us, yield to it
-                if (reinterpret_cast<std::atomic_int64_t&>(jb.wait_handle->counter).load() == 0)
+                if (reinterpret_cast<std::atomic_int64_t&>(jb.wait_handle->_counter).load() == 0)
                 {
-                    void* fiber = jb.wait_handle->fiber;
+                    void* fiber = jb.wait_handle->_fiber;
 
                     // A fiber is waiting for us
                     if (fiber != nullptr)
                     {
-                        jb.wait_handle->fiber = nullptr;
-                        ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock); // allow other jobs to await
-                        SwitchToFiber(fiber);                                     // yield back to awaiter fiber, await will put us back at pool
+                        jb.wait_handle->_fiber = nullptr;
+                        ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock); // allow other jobs to await
+                        SwitchToFiber(fiber);                                      // yield back to awaiter fiber, await will put us back at pool
                     }
                     else
                     {
                         // No one is awaiting for us
-                        ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
+                        ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock);
                     }
                 }
                 else
                 {
                     // There may be more jobs for us
-                    ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->lock);
+                    ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock);
                 }
             }
         }
@@ -300,7 +300,7 @@ int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration* job)
     TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
     if (job->wait_handle != nullptr)
-        reinterpret_cast<std::atomic_int64_t&>(job->wait_handle->counter)++;
+        reinterpret_cast<std::atomic_int64_t&>(job->wait_handle->_counter)++;
 
     TinyRingBufferStatus sts = fs.job_queue.enqueue(*job);
     if (sts != TinyRingBufferStatus::SUCCESS)
@@ -321,7 +321,7 @@ int tfb_add_jobs_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t
     TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
     if (jobs[0].wait_handle != nullptr)
-        reinterpret_cast<std::atomic_int64_t&>(jobs[0].wait_handle->counter) += elements;
+        reinterpret_cast<std::atomic_int64_t&>(jobs[0].wait_handle->_counter) += elements;
 
     if (fs.job_queue.enqueue(jobs, elements) != TinyRingBufferStatus::SUCCESS)
         return -1;
@@ -342,17 +342,17 @@ int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle* wait_handle)
 
     TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
-    AcquireSRWLockExclusive((PSRWLOCK)&wait_handle->lock);
+    AcquireSRWLockExclusive((PSRWLOCK)&wait_handle->_lock);
 
     // Put this to fiber queue
-    if (reinterpret_cast<std::atomic_int64_t&>(wait_handle->counter).load() == 0)
+    if (reinterpret_cast<std::atomic_int64_t&>(wait_handle->_counter).load() == 0)
     {
-        ReleaseSRWLockExclusive((PSRWLOCK)&wait_handle->lock);
+        ReleaseSRWLockExclusive((PSRWLOCK)&wait_handle->_lock);
         return 0;
     }
 
-    wait_handle->fiber = GetCurrentFiber();
-    fs.l_wait_handle_lock = (PSRWLOCK)&wait_handle->lock;
+    wait_handle->_fiber = GetCurrentFiber();
+    fs.l_wait_handle_lock = (PSRWLOCK)&wait_handle->_lock;
 
     void* new_fiber;
     if (fs.fiber_pool.dequeue(&new_fiber) == TinyRingBufferStatus::SUCCESS)
