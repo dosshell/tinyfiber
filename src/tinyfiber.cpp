@@ -210,30 +210,29 @@ static void start_workers(void* fiber_system)
 
 int tfb_init_ext(TfbContext** fiber_system, int max_threads)
 {
-    if (fiber_system == nullptr)
-        return -1;
+    TfbContext* fs = new TfbContext();
+    l_my_fiber_system = fs;
+    if (fiber_system != nullptr)
+        *fiber_system = fs;
 
-    *fiber_system = new TfbContext();
-
-    TfbContext& fs = **fiber_system;
     // Init pools etc.
-    fs.job_queue.init(TFB_JOB_QUEUE_SIZE);
-    fs.fiber_pool.init(TFB_FIBER_POOL_SIZE);
+    fs->job_queue.init(TFB_JOB_QUEUE_SIZE);
+    fs->fiber_pool.init(TFB_FIBER_POOL_SIZE);
 
     // -1 since main thread counts
-    fs.no_of_worker_threads = std::thread::hardware_concurrency();
-    fs.no_of_worker_threads = std::min(fs.no_of_worker_threads, TFB_MAX_NUMBER_OF_THREADS);
+    fs->no_of_worker_threads = std::thread::hardware_concurrency();
+    fs->no_of_worker_threads = std::min(fs->no_of_worker_threads, TFB_MAX_NUMBER_OF_THREADS);
 
     if (max_threads != TFB_ALL_CORES)
-        fs.no_of_worker_threads = std::min(fs.no_of_worker_threads, max_threads);
+        fs->no_of_worker_threads = std::min(fs->no_of_worker_threads, max_threads);
 
     void** allocated_fibers = nullptr;
-    if (fs.fiber_pool.allocate(TFB_NUMBER_OF_FIBERS, &allocated_fibers) != TinyRingBufferStatus::SUCCESS)
+    if (fs->fiber_pool.allocate(TFB_NUMBER_OF_FIBERS, &allocated_fibers) != TinyRingBufferStatus::SUCCESS)
         return -1;
 
     for (int i = 0; i < TFB_NUMBER_OF_FIBERS; ++i)
     {
-        void* fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, fiber_main_loop, &fs);
+        void* fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, fiber_main_loop, fs);
         if (fiber == nullptr)
         {
             // DWORD err = GetLastError();
@@ -244,43 +243,49 @@ int tfb_init_ext(TfbContext** fiber_system, int max_threads)
     }
 
     // Switch away from main thread and start worker system
-    fs.main_fiber = ConvertThreadToFiber(nullptr);
-    fs.init_fibers_fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, start_workers, &fs);
-    SwitchToFiber(fs.init_fibers_fiber); // Lose main fiber from main thread
+    fs->main_fiber = ConvertThreadToFiber(nullptr);
+    fs->init_fibers_fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, start_workers, fs);
+    SwitchToFiber(fs->init_fibers_fiber); // Lose main fiber from main thread
     // Worker thread will execute from here now
     return 0;
 }
 
 // Must be called from main fiber (eg, from no job)
-int tfb_free(TfbContext** fiber_system)
+int tfb_free_ext(TfbContext** fiber_system)
 {
-    if (fiber_system == nullptr || *fiber_system == nullptr)
+    TfbContext* fs = l_my_fiber_system;
+
+    if (fs == nullptr)
         return -1;
 
-    TfbContext& fs = **fiber_system;
+    if (fiber_system != nullptr && (*fiber_system != fs))
+        return -1;
 
     {
-        std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
-        fs.should_exit = true;
+        std::lock_guard<std::mutex> lk(fs->pending_jobs_mx);
+        fs->should_exit = true;
     }
 
-    fs.no_job_cv.notify_all();
+    fs->no_job_cv.notify_all();
 
-    SwitchToFiber(fs.l_worker_fiber);
+    SwitchToFiber(fs->l_worker_fiber);
 
     ConvertFiberToThread();
 
     // Delete fibers
-    DeleteFiber(fs.init_fibers_fiber);
-    void** deallocate_fibers = fs.fiber_pool.data();
+    DeleteFiber(fs->init_fibers_fiber);
+    void** deallocate_fibers = fs->fiber_pool.data();
     for (int i = 0; i < TFB_NUMBER_OF_FIBERS; ++i)
         DeleteFiber(deallocate_fibers[i]);
-    fs.fiber_pool.free();
-    fs.job_queue.free();
+    fs->fiber_pool.free();
+    fs->job_queue.free();
 
-    delete *fiber_system;
+    delete fs;
 
-    *fiber_system = nullptr;
+    l_my_fiber_system = nullptr;
+    if (fiber_system != nullptr)
+        *fiber_system = nullptr;
+
     return 0;
 }
 

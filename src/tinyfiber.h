@@ -52,12 +52,17 @@ extern "C"
 
     int tfb_init_ext(TfbContext** fiber_system, int max_threads);
 
-    inline int tfb_init(TfbContext** fiber_system)
+    inline int tfb_init()
     {
-        return tfb_init_ext(fiber_system, TFB_ALL_CORES);
+        return tfb_init_ext(NULL, TFB_ALL_CORES);
     }
 
-    int tfb_free(TfbContext** fiber_system);
+    int tfb_free_ext(TfbContext** fiber_system);
+
+    inline int tfb_free()
+    {
+        return tfb_free_ext(NULL);
+    }
 
     int tfb_add_job_ext(TfbContext* fiber_system, TfbJobDeclaration* job_declaration);
 
