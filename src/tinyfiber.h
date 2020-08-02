@@ -22,7 +22,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#pragma once
+#ifndef TINYFIBER_H
+#define TINYFIBER_H
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -50,6 +52,21 @@ extern "C"
     const int TFB_ALL_CORES = 0;
     TfbContext* const TFB_MY_CONTEXT = NULL;
 
+    /**
+     * @brief Creates a new fiber system context.
+     *
+     * @code
+     * TfbContext* fiber_system = NULL;
+     * tfb_init_ext(&fiber_system, TFB_ALL_CORES);
+     * tfb_free_ext&fiber_system);
+     * @endcode
+     *
+     * @param fiber_system is your in-out pointer to a TfbContext pointer. Initialize to NULL before use.
+     * @param max_threads descibes how many working threads your fiber system should have.
+     * @return 0 if successful, otherwise the error code.
+     * @see tfb_init()
+     * @see rfb_free_ext()
+     */
     int tfb_init_ext(TfbContext** fiber_system, int max_threads);
 
     inline int tfb_init()
@@ -80,13 +97,13 @@ extern "C"
 
     inline int tfb_add_job_ext(TfbContext* fiber_system, void (*func)(void*), void* user_data, TfbWaitHandle* wh)
     {
-        TfbJobDeclaration job{func, user_data, wh};
+        TfbJobDeclaration job = {func, user_data, wh};
         return tfb_add_jobdecl_ext(fiber_system, &job);
     }
 
     inline int tfb_add_job(void (*func)(void*), void* user_data, TfbWaitHandle* wh)
     {
-        TfbJobDeclaration job{func, user_data, wh};
+        TfbJobDeclaration job = {func, user_data, wh};
         return tfb_add_jobdecl(&job);
     }
 
@@ -99,4 +116,6 @@ extern "C"
 
 #ifdef __cplusplus
 }
+#endif
+
 #endif
