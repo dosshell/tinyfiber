@@ -74,7 +74,7 @@ namespace
 {
 thread_local TfbContext* l_my_fiber_system;
 
-static void fiber_main_loop(void* fiber_system)
+static void __stdcall fiber_main_loop(void* fiber_system)
 {
     if (fiber_system == nullptr)
         return;
@@ -173,7 +173,7 @@ static int worker_function(TfbContext& fs)
     return 0;
 }
 
-static void start_workers(void* fiber_system)
+static void __stdcall start_workers(void* fiber_system)
 {
     if (fiber_system == nullptr)
         return;

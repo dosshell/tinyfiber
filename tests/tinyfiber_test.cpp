@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 Markus Lindelöw
+Copyright (c) 2020 Markus Lindelï¿½w
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,7 @@ SOFTWARE.
 #include "doctest.hpp"
 #include <atomic>
 #include <thread>
+#include <sstream>
 
 namespace tinyfiber
 {
@@ -67,8 +68,14 @@ TEST_CASE("tinyfiber init/deinit simple")
     int sts = tfb_free();
 
     // Then
-    CHECK(start_id != run_id);
-    CHECK(std::this_thread::get_id() == start_id);
+    std::stringstream ss_start_id; // warning C4717
+    std::stringstream ss_run_id;
+    ss_start_id << start_id;
+    ss_run_id << run_id;
+    CHECK(ss_start_id.str() != ss_run_id.str());
+    std::stringstream ss_now_id;
+    ss_now_id << std::this_thread::get_id();
+    CHECK(ss_now_id.str() == ss_start_id.str());
     CHECK(sts == 0);
 }
 

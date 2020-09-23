@@ -64,6 +64,7 @@ public:
         free();
     }
 
+    // To make it easier to use BSS
     TinyRingBufferStatus init(int64_t buffer_size)
     {
         if (buffer_size & 0xffff)
@@ -73,8 +74,8 @@ public:
         while (tries < 5 && m_buffer == nullptr)
         {
             m_buffer_size = buffer_size;
-            size_t virtual_size = m_buffer_size * 3; // todo(markusl): why 3 and not 2 ?
-            m_buffer = (uint8_t*)VirtualAlloc(nullptr, virtual_size, MEM_RESERVE, PAGE_NOACCESS);
+            int64_t virtual_size = m_buffer_size * 3; // todo(markusl): why 3 and not 2 ?
+            m_buffer = (uint8_t*)VirtualAlloc(nullptr, (SIZE_T)virtual_size, MEM_RESERVE, PAGE_NOACCESS);
             VirtualFree(m_buffer, 0, MEM_RELEASE);
 
             if (m_buffer != nullptr)
@@ -87,8 +88,8 @@ public:
                 }
                 else
                 {
-                    m_map = MapViewOfFileEx(m_handle, FILE_MAP_ALL_ACCESS, 0, 0, m_buffer_size, m_buffer);
-                    void* map2 = MapViewOfFileEx(m_handle, FILE_MAP_ALL_ACCESS, 0, 0, m_buffer_size, m_buffer + m_buffer_size);
+                    m_map = MapViewOfFileEx(m_handle, FILE_MAP_ALL_ACCESS, 0, 0, (SIZE_T)m_buffer_size, m_buffer);
+                    void* map2 = MapViewOfFileEx(m_handle, FILE_MAP_ALL_ACCESS, 0, 0, (SIZE_T)m_buffer_size, m_buffer + m_buffer_size);
 
                     if (m_map == nullptr || map2 == nullptr)
                         free();
