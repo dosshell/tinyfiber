@@ -1,12 +1,19 @@
-cmake_minimum_required (VERSION 3.10)
-project (tinyfiber)
+cmake_minimum_required (VERSION 3.0.0)
+project (main CXX)
 
-# set(CMAKE_CXX_STANDARD 17)
+SET(CMAKE_EXPORT_COMPILE_COMMANDS 1)
+SET(CMAKE_CXX_COMPILER "clang++")
+SET(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES  ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0")
 
-if (WIN32)
-    set(WINVER 0x0600)
-    set(_WIN32_WINNT 0x0600)
-endif()
+include_directories(include)
+file(GLOB SRC src/*.cpp)
+add_executable(main ${SRC})
 
-add_subdirectory(src)
-add_subdirectory(tests)
+add_custom_target(
+	copy-compile-commands ALL
+	${CMAKE_COMMAND} -E copy_if_different
+	${CMAKE_BINARY_DIR}/compile_commands.json
+	${CMAKE_CURRENT_LIST_DIR}
+)
