@@ -33,11 +33,15 @@ SOFTWARE.
 #include <mutex>
 #include <stdint.h>
 
+#ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #define VC_EXTRALEAN
 #include <Windows.h>
 #include <synchapi.h>
+#else
+#define __stdcall
+#endif
 
 using utils::TinyRingBuffer;
 using utils::TinyRingBufferStatus;
@@ -60,15 +64,18 @@ struct TfbContext
     std::atomic_int64_t no_of_pending_jobs;
     std::atomic<void*> main_fiber;
     void* init_fibers_fiber = nullptr;
-
+#ifdef _WIN32
     static thread_local void* l_worker_fiber;
     static thread_local void* l_finished_fiber;
     static thread_local PSRWLOCK l_wait_handle_lock;
+#endif
 };
 
+#ifdef _WIN32
 thread_local void* TfbContext::l_worker_fiber;
 thread_local void* TfbContext::l_finished_fiber;
 thread_local PSRWLOCK TfbContext::l_wait_handle_lock;
+#endif
 
 namespace
 {
@@ -76,6 +83,7 @@ thread_local TfbContext* l_my_fiber_system;
 
 static void __stdcall fiber_main_loop(void* fiber_system)
 {
+#ifdef _WIN32
     if (fiber_system == nullptr)
         return;
 
@@ -139,10 +147,12 @@ static void __stdcall fiber_main_loop(void* fiber_system)
             SwitchToFiber(fs.l_worker_fiber); // worker fiber will put us back to pool
         }
     }
+#endif
 }
 
 static int worker_function(TfbContext& fs)
 {
+#ifdef _WIN32
     while (!fs.should_exit)
     {
         if (fs.no_of_pending_jobs > 0)
@@ -170,11 +180,13 @@ static int worker_function(TfbContext& fs)
             fs.no_job_cv.wait(lk, [&] { return fs.no_of_pending_jobs > 0 || fs.should_exit; });
         }
     }
+#endif
     return 0;
 }
 
 static void __stdcall start_workers(void* fiber_system)
 {
+#ifdef _WIN32
     if (fiber_system == nullptr)
         return;
 
@@ -207,12 +219,14 @@ static void __stdcall start_workers(void* fiber_system)
         fs.worker_threads[i].join();
     }
     SwitchToFiber(fs.main_fiber);
+#endif
 }
 
 } // namespace
 
 int tfb_init_ext(TfbContext** fiber_system, int max_threads)
 {
+#ifdef _WIN32
     TfbContext* fs = new TfbContext();
     l_my_fiber_system = fs;
     if (fiber_system != nullptr)
@@ -250,12 +264,14 @@ int tfb_init_ext(TfbContext** fiber_system, int max_threads)
     fs->init_fibers_fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, start_workers, fs);
     SwitchToFiber(fs->init_fibers_fiber); // Lose main fiber from main thread
     // Worker thread will execute from here now
+#endif
     return 0;
 }
 
 // Must be called from main fiber (eg, from no job)
 int tfb_free_ext(TfbContext** fiber_system)
 {
+#ifdef _WIN32
     TfbContext* fs = l_my_fiber_system;
 
     if (fs == nullptr)
@@ -288,12 +304,13 @@ int tfb_free_ext(TfbContext** fiber_system)
     l_my_fiber_system = nullptr;
     if (fiber_system != nullptr)
         *fiber_system = nullptr;
-
+#endif
     return 0;
 }
 
 int tfb_add_jobdecl_ext(TfbContext* fiber_system, TfbJobDeclaration* job)
 {
+#ifdef _WIN32
     if (job == nullptr)
         return -1;
 
@@ -314,13 +331,14 @@ int tfb_add_jobdecl_ext(TfbContext* fiber_system, TfbJobDeclaration* job)
         ++fs.no_of_pending_jobs;
     }
     fs.no_job_cv.notify_one();
-
+#endif
     return 0;
 }
 
 // Must have the same WaitHandler*
 int tfb_add_jobdecls_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements)
 {
+#ifdef _WIN32
     TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
     if (jobs[0].wait_handle != nullptr)
@@ -334,7 +352,7 @@ int tfb_add_jobdecls_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int
         fs.no_of_pending_jobs += elements;
     }
     fs.no_job_cv.notify_all();
-
+#endif
     return 0;
 }
 
@@ -342,7 +360,7 @@ int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle* wait_handle)
 {
     if (wait_handle == nullptr)
         return -1;
-
+#ifdef _WIN32
     TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
     AcquireSRWLockExclusive((PSRWLOCK)&wait_handle->_lock);
@@ -369,6 +387,6 @@ int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle* wait_handle)
     {
         return -1;
     }
-
+#endif
     return 0;
 }

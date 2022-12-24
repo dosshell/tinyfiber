@@ -5,4 +5,6 @@ if (MSVC)
 endif ()
 
 target_include_directories(tinyfiber PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(tinyfiber LINK_PUBLIC Kernel32.lib)
+if (MSVC)
+    target_link_libraries(tinyfiber LINK_PUBLIC Kernel32.lib)
+endif ()

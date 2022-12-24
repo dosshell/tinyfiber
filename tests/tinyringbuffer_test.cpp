@@ -34,6 +34,7 @@ SOFTWARE.
 
 using utils::TinyRingBuffer;
 using utils::TinyRingBufferStatus;
+using namespace std;
 
 namespace
 {

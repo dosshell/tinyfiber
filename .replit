@@ -1,5 +1,5 @@
 compile = "cmake --log-level=WARNING -B/tmp/build . && make -s -C /tmp/build"
-run = "/tmp/build/main"
+run = "/tmp/build/tests/tinyfiber-test"
 entrypoint = "src/main.cpp"
 
 [debugger]
@@ -44,7 +44,7 @@ externalConsole = false
 logging = {}
 miDebuggerPath = "gdb"
 name = "g++ - Build and debug active file"
-program = "/tmp/build/main"
+program = "/tmp/build/tests"
 request = "launch"
 setupCommands = [
 	{ description = "Enable pretty-printing for gdb", ignoreFailures = true, text = "-enable-pretty-printing" }

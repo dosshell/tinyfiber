@@ -23,13 +23,18 @@ SOFTWARE.
 */
 
 #pragma once
+#ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #define VC_EXTRALEAN
+#endif
+
 
 #include <stdint.h>
+#ifdef _WIN32
 #include <Windows.h>
 #include <synchapi.h>
+#endif
 #include <atomic>
 
 namespace utils
@@ -52,10 +57,12 @@ public:
         , m_tail(0)
         , m_used_bytes(0)
         , m_buffer_size(0) // Make it a multiple of a page size, 64K
-        , m_lock(SRWLOCK_INIT)
         , m_buffer(nullptr)
+#ifdef _WIN32
+        , m_lock(SRWLOCK_INIT)
         , m_handle()
         , m_map()
+#endif
     {
     }
 
@@ -69,7 +76,7 @@ public:
     {
         if (buffer_size & 0xffff)
             return TinyRingBufferStatus::INVALID_ARGUMENT;
-
+#ifdef _WIN32
         int tries = 0;
         while (tries < 5 && m_buffer == nullptr)
         {
@@ -98,7 +105,7 @@ public:
                 tries++;
             }
         }
-
+#endif
         if (m_buffer == nullptr)
             return TinyRingBufferStatus::MEMORY_ERROR;
         return TinyRingBufferStatus::SUCCESS;
@@ -106,6 +113,7 @@ public:
 
     TinyRingBufferStatus free()
     {
+#ifdef _WIN32
         bool a = UnmapViewOfFile(m_map);
         bool b = UnmapViewOfFile((uint8_t*)m_map + m_buffer_size);
         if (a == 0 || b == 0)
@@ -124,7 +132,7 @@ public:
             CloseHandle(m_handle);
             m_handle = nullptr;
         }
-
+#endif
         return TinyRingBufferStatus::SUCCESS;
     }
 
@@ -136,7 +144,7 @@ public:
         {
             p = data();
         }
-
+#ifdef _WIN32
         const int64_t byte_size = (int64_t)sizeof(T) * elements;
         AcquireSRWLockExclusive(&m_lock);
         if (m_used_bytes + byte_size > m_buffer_size)
@@ -153,11 +161,13 @@ public:
         ReleaseSRWLockExclusive(&m_lock);
         if (ptr != nullptr)
             *ptr = p;
+#endif
         return TinyRingBufferStatus::SUCCESS;
     }
 
     TinyRingBufferStatus enqueue(const T& src)
     {
+#ifdef _WIN32
         const int64_t byte_size = (int64_t)sizeof(T);
         AcquireSRWLockExclusive(&m_lock);
         if (m_used_bytes + byte_size > m_buffer_size)
@@ -171,11 +181,13 @@ public:
         m_used_bytes += byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
+#endif
         return TinyRingBufferStatus::SUCCESS;
     }
 
     TinyRingBufferStatus enqueue(const T* src, int64_t elements)
     {
+#ifdef _WIN32
         const int64_t byte_size = (int64_t)sizeof(T) * elements;
         AcquireSRWLockExclusive(&m_lock);
         if (m_used_bytes + byte_size > m_buffer_size)
@@ -191,11 +203,13 @@ public:
         m_used_bytes += byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
+#endif
         return TinyRingBufferStatus::SUCCESS;
     }
 
     TinyRingBufferStatus dequeue(T* dst)
     {
+#ifdef _WIN32
         const int64_t byte_size = (int64_t)sizeof(T);
         AcquireSRWLockExclusive(&m_lock);
 
@@ -211,11 +225,13 @@ public:
         m_used_bytes -= byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
+#endif
         return TinyRingBufferStatus::SUCCESS;
     }
 
     TinyRingBufferStatus dequeue(T* dst, int64_t elements)
     {
+#ifdef _WIN32
         const int64_t byte_size = (int64_t)sizeof(T) * elements;
         AcquireSRWLockExclusive(&m_lock);
         if (m_used_bytes - byte_size < 0)
@@ -233,7 +249,8 @@ public:
         m_used_bytes -= byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
-        return SUCCESS;
+#endif
+        return TinyRingBufferStatus::SUCCESS;
     }
 
     int64_t buffer_size() const
@@ -268,9 +285,10 @@ protected:
     std::atomic_int64_t m_used_bytes;
     int64_t m_buffer_size;
     uint8_t* m_buffer;
-
+#ifdef _WIN32
     SRWLOCK m_lock;
     void* m_map;
     HANDLE m_handle;
+#endif
 };
 } // namespace utils
