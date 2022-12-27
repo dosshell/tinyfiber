@@ -23,19 +23,19 @@ SOFTWARE.
 */
 
 #pragma once
+
+#include <stdint.h>
+#include <atomic>
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #define VC_EXTRALEAN
-#endif
-
-
-#include <stdint.h>
-#ifdef _WIN32
 #include <Windows.h>
 #include <synchapi.h>
+#else
+#include <vector>
+#include <shared_mutex>
 #endif
-#include <atomic>
 
 namespace utils
 {
@@ -52,35 +52,30 @@ template <typename T>
 class TinyRingBuffer
 {
 public:
-    TinyRingBuffer()
-        : m_head(0)
-        , m_tail(0)
-        , m_used_bytes(0)
-        , m_buffer_size(0) // Make it a multiple of a page size, 64K
-        , m_buffer(nullptr)
-#ifdef _WIN32
-        , m_lock(SRWLOCK_INIT)
-        , m_handle()
-        , m_map()
-#endif
-    {
-    }
-
-    ~TinyRingBuffer()
+    TinyRingBuffer() {}
+    TinyRingBuffer(const TinyRingBuffer & other) = delete;
+    TinyRingBuffer(const TinyRingBuffer && other) = delete;
+    virtual ~TinyRingBuffer()
     {
         free();
     }
+    TinyRingBuffer& operator=(const TinyRingBuffer & other) = delete;
+    TinyRingBuffer& operator=(const TinyRingBuffer && other) = delete;
 
     // To make it easier to use BSS
-    TinyRingBufferStatus init(int64_t buffer_size)
+    TinyRingBufferStatus init(int64_t buffer_length)
     {
+#ifdef _WIN32
+        int64_t buffer_size = buffer_length * sizeof(T);
+        buffer_size = (buffer_size + (0xffff-1)) & ~0xffff;
         if (buffer_size & 0xffff)
             return TinyRingBufferStatus::INVALID_ARGUMENT;
-#ifdef _WIN32
+
+        m_buffer_size = buffer_size; // Make it a multiple of a page size, 64K  
+
         int tries = 0;
         while (tries < 5 && m_buffer == nullptr)
         {
-            m_buffer_size = buffer_size;
             int64_t virtual_size = m_buffer_size * 3; // todo(markusl): why 3 and not 2 ?
             m_buffer = (uint8_t*)VirtualAlloc(nullptr, (SIZE_T)virtual_size, MEM_RESERVE, PAGE_NOACCESS);
             VirtualFree(m_buffer, 0, MEM_RELEASE);
@@ -105,9 +100,12 @@ public:
                 tries++;
             }
         }
-#endif
         if (m_buffer == nullptr)
             return TinyRingBufferStatus::MEMORY_ERROR;
+#else
+        std::unique_lock lock(m_mutex);
+        m_buffer.resize(buffer_length);
+#endif
         return TinyRingBufferStatus::SUCCESS;
     }
 
@@ -132,35 +130,9 @@ public:
             CloseHandle(m_handle);
             m_handle = nullptr;
         }
-#endif
-        return TinyRingBufferStatus::SUCCESS;
-    }
-
-    // Non-thread safe ptr parameter
-    TinyRingBufferStatus allocate(int64_t elements, T** ptr)
-    {
-        T* p = nullptr;
-        if (ptr != nullptr)
-        {
-            p = data();
-        }
-#ifdef _WIN32
-        const int64_t byte_size = (int64_t)sizeof(T) * elements;
-        AcquireSRWLockExclusive(&m_lock);
-        if (m_used_bytes + byte_size > m_buffer_size)
-        {
-            ReleaseSRWLockExclusive(&m_lock);
-            if (ptr != nullptr)
-                *ptr = nullptr;
-            return TinyRingBufferStatus::BUFFER_FULL;
-        }
-
-        m_head = (m_head + byte_size) % m_buffer_size;
-        m_used_bytes += byte_size;
-
-        ReleaseSRWLockExclusive(&m_lock);
-        if (ptr != nullptr)
-            *ptr = p;
+#else
+        std::unique_lock lock(m_mutex); 
+        std::vector<T>().swap(m_buffer);
 #endif
         return TinyRingBufferStatus::SUCCESS;
     }
@@ -181,6 +153,12 @@ public:
         m_used_bytes += byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
+#else
+        std::unique_lock lock(m_mutex);
+        int64_t i = m_head;
+        m_head = (m_head + 1) % m_buffer.size();
+        m_buffer[i] = src;
+        m_count++;
 #endif
         return TinyRingBufferStatus::SUCCESS;
     }
@@ -226,6 +204,14 @@ public:
 
         ReleaseSRWLockExclusive(&m_lock);
 #endif
+        std::unique_lock lock(m_mutex);
+        if (m_count <= 0) {
+            return TinyRingBufferStatus::BUFFER_EMPTY;
+        }
+        int64_t i = m_tail;
+        m_tail = (m_tail + 1) % m_buffer.size();
+        *dst = m_buffer[i];
+        m_count--;
         return TinyRingBufferStatus::SUCCESS;
     }
 
@@ -253,42 +239,104 @@ public:
         return TinyRingBufferStatus::SUCCESS;
     }
 
+    [[nodiscard]]
     int64_t buffer_size() const
     {
+#ifdef _WIN32
         return m_buffer_size;
+#else
+        std::shared_lock lock(m_mutex);
+        return m_buffer.size() * sizeof(T);
+#endif
     }
 
+    [[nodiscard]]
     bool empty() const
     {
+#ifdef _WIN32
         return m_used_bytes == 0;
+#else
+        std::shared_lock lock(m_mutex);
+        return m_head == m_tail;
+#endif
     }
 
+    [[nodiscard]]
     bool is_inited() const
     {
+#ifdef _WIN32
         return m_buffer != nullptr;
+#else
+        std::shared_lock lock(m_mutex);
+        return m_buffer.size() > 0;
+#endif
     }
 
-    // non-thread safe access
-    T* data()
-    {
-        return reinterpret_cast<T*>(m_buffer + m_tail);
-    }
-
+    [[nodiscard]]
     int64_t count() const
     {
+#ifdef _WIN32
         return m_used_bytes / sizeof(T);
+#else
+        std::shared_lock lock(m_mutex);
+        return m_count;
+#endif
     }
 
 protected:
-    int64_t m_head;
-    int64_t m_tail;
-    std::atomic_int64_t m_used_bytes;
-    int64_t m_buffer_size;
-    uint8_t* m_buffer;
+
+    // Non-thread safe ptr parameter
+    TinyRingBufferStatus allocate(int64_t elements, T** ptr)
+    {
+        T* p = nullptr;
+        if (ptr != nullptr)
+        {
+            p = data();
+        }
 #ifdef _WIN32
-    SRWLOCK m_lock;
-    void* m_map;
-    HANDLE m_handle;
+        const int64_t byte_size = (int64_t)sizeof(T) * elements;
+        AcquireSRWLockExclusive(&m_lock);
+        if (m_used_bytes + byte_size > m_buffer_size)
+        {
+            ReleaseSRWLockExclusive(&m_lock);
+            if (ptr != nullptr)
+                *ptr = nullptr;
+            return TinyRingBufferStatus::BUFFER_FULL;
+        }
+
+        m_head = (m_head + byte_size) % m_buffer_size;
+        m_used_bytes += byte_size;
+
+        ReleaseSRWLockExclusive(&m_lock);
+        if (ptr != nullptr)
+            *ptr = p;
+#endif
+        return TinyRingBufferStatus::SUCCESS;
+    }
+
+    T* data()
+    {
+#ifdef _WIN32
+        return reinterpret_cast<T*>(m_buffer + m_tail); // tail!?
+#else
+        return reinterpret_cast<T*>(m_buffer.data() + m_tail);
+#endif
+    }
+
+private:
+    int64_t m_head = 0;
+    int64_t m_tail = 0;
+#ifdef _WIN32
+    std::atomic_int64_t m_used_bytes = 0;
+    int64_t m_buffer_size = 0;
+    uint8_t* m_buffer = nullptr;
+    SRWLOCK m_lock = SRWLOCK_INIT;
+    void* m_map = nullptr;
+    HANDLE m_handle = NULL;
+#else
+    int64_t m_count = 0; // tail and head can not be used. is the buffer empty or full?
+    std::vector<T> m_buffer;
+    mutable std::shared_mutex m_mutex;
 #endif
 };
 } // namespace utils

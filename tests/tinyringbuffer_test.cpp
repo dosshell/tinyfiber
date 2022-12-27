@@ -84,8 +84,28 @@ TEST_CASE("tinyringbuffer free")
 
     // Then
     CHECK(sts == TinyRingBufferStatus::SUCCESS);
+    CHECK(rb.is_inited() == false);
 }
 
+TEST_CASE("Single enqueue and dequeue")
+{
+    // Given
+    TinyRingBuffer<int> rb;
+    REQUIRE(rb.init(INTEGER_BUFFER_SIZE) == TinyRingBufferStatus::SUCCESS);
+
+    // When
+    int a = 235;
+    int b = 0;
+    rb.enqueue(a);
+    TinyRingBufferStatus sts = rb.dequeue(&b);
+
+    // Then
+    CHECK(sts == TinyRingBufferStatus::SUCCESS);
+    CHECK(rb.is_inited() == true);
+    CHECK(a == b);
+}
+
+#ifdef PERFTEST
 TEST_CASE("tinyringbuffer performance")
 {
     {
@@ -206,3 +226,4 @@ TEST_CASE("tinyringbuffer performance")
         CHECK_EQ(sum, 300030000);
     }
 }
+#endif
