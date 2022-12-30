@@ -47,10 +47,10 @@ using utils::TinyRingBuffer;
 using utils::TinyRingBufferStatus;
 
 const int TFB_DEFAULT_STACKSIZE = 0;
-const int TFB_MAX_NUMBER_OF_THREADS = 32;
+const int TFB_MAX_NUMBER_OF_THREADS = 256;
 const int TFB_NUMBER_OF_FIBERS = 1024;
-const int TFB_FIBER_POOL_SIZE = 64 * 1024;
-const int TFB_JOB_QUEUE_SIZE = 64 * 1024;
+const int TFB_FIBER_POOL_SIZE = 1024;
+const int TFB_JOB_QUEUE_SIZE = 1024;
 
 struct TfbContext
 {

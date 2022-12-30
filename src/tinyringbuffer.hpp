@@ -35,6 +35,7 @@ SOFTWARE.
 #else
 #include <vector>
 #include <shared_mutex>
+#include <mutex>
 #include <utility> // std::move
 #endif
 
@@ -64,7 +65,7 @@ public:
 #ifdef _WIN32
         
 #else
-        std::unique_lock lock{other.m_mutex};
+        std::scoped_lock lock{other.m_mutex};
         std::swap(m_head, other.m_head);
         std::swap(m_tail, other.m_tail);
         std::swap(m_count, other.m_count);
@@ -78,8 +79,7 @@ public:
     TinyRingBuffer& operator=(const TinyRingBuffer & other) = delete;
     TinyRingBuffer& operator=(TinyRingBuffer && other)
     {
-        std::unique_lock my_lock{m_mutex};
-        std::unique_lock other_lock{other.m_mutex};
+        std::scoped_lock lock{m_mutex, other.m_mutex};
         m_head = other.m_head;
         other.m_head = 0;
         m_tail = other.m_tail;
@@ -107,7 +107,7 @@ public:
 
         ReleaseSRWLockExclusive(&m_lock);
 #else
-        std::unique_lock lock(m_mutex);
+        std::scoped_lock lock(m_mutex);
         if (m_count >= m_buffer.size())
             return TinyRingBufferStatus::BUFFER_FULL;
 
@@ -160,7 +160,7 @@ public:
 
         ReleaseSRWLockExclusive(&m_lock);
 #else
-        std::unique_lock lock(m_mutex);
+        std::scoped_lock lock(m_mutex);
         if (m_count <= 0)
             return TinyRingBufferStatus::BUFFER_EMPTY;
 

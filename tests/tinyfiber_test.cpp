@@ -29,7 +29,6 @@ SOFTWARE.
 #include <thread>
 #include <sstream>
 
-#if 0
 namespace tinyfiber
 {
 void recursive_job(void* param)
@@ -79,7 +78,7 @@ TEST_CASE("tinyfiber init/deinit simple")
     CHECK(ss_now_id.str() == ss_start_id.str());
     CHECK(sts == 0);
 }
-
+#if 0
 TEST_CASE("tinyfiber init ext")
 {
     // Given
@@ -194,5 +193,5 @@ TEST_CASE("Example code")
     job(&depth);
     tfb_free();
 }
-} // namespace tinyfiber
 #endif
+} // namespace tinyfiber
