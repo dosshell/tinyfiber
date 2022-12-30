@@ -61,48 +61,122 @@ static const int BUFFER_SIZE_SMALL = 64 * 1024;
 
 } // namespace
 
-TEST_CASE("tinyringbuffer init")
+TEST_CASE("Simple Init")
 {
     // Given
-    TinyRingBuffer<void*> rb;
+    size_t length = 1024;
 
     // When
-    TinyRingBufferStatus sts = rb.init(INTEGER_BUFFER_SIZE);
+    TinyRingBuffer<void*> rb(length);
 
     // Then
-    CHECK(sts == TinyRingBufferStatus::SUCCESS);
+    CHECK(rb.length() >= length);
+    CHECK(rb.empty());
 }
 
-TEST_CASE("tinyringbuffer free")
+TEST_CASE("Dequeue Empty")
 {
     // Given
-    TinyRingBuffer<void*> rb;
-    REQUIRE(rb.init(INTEGER_BUFFER_SIZE) == TinyRingBufferStatus::SUCCESS);
-
+    size_t length = 1;
+    TinyRingBuffer<int> rb(length);
+    
     // When
-    TinyRingBufferStatus sts = rb.free();
-
+    auto sts = rb.dequeue(nullptr);
+    
     // Then
-    CHECK(sts == TinyRingBufferStatus::SUCCESS);
-    CHECK(rb.is_inited() == false);
+    CHECK(sts == TinyRingBufferStatus::BUFFER_EMPTY);
 }
 
-TEST_CASE("Single enqueue and dequeue")
+TEST_CASE("Single Enqueue and Dequeue")
 {
     // Given
-    TinyRingBuffer<int> rb;
-    REQUIRE(rb.init(INTEGER_BUFFER_SIZE) == TinyRingBufferStatus::SUCCESS);
-
-    // When
+    TinyRingBuffer<int> rb(1024);
     int a = 235;
     int b = 0;
+    
+    // When
     rb.enqueue(a);
     TinyRingBufferStatus sts = rb.dequeue(&b);
 
     // Then
     CHECK(sts == TinyRingBufferStatus::SUCCESS);
-    CHECK(rb.is_inited() == true);
+    CHECK(rb.empty());
+    CHECK(rb.count() == 0);
+    CHECK(rb.length() >= 1024);
     CHECK(a == b);
+}
+
+TEST_CASE("Enqueue Full")
+{
+    // Given
+    TinyRingBuffer<int> rb(2);
+    rb.enqueue(1);
+    rb.enqueue(2);
+    
+    // When
+    TinyRingBufferStatus sts = rb.enqueue(3);
+
+    // Then
+    CHECK(sts == TinyRingBufferStatus::BUFFER_FULL);
+}
+
+TEST_CASE("Double Enqueue and Dequeue")
+{
+    // Given
+    TinyRingBuffer<int> rb(1);
+    int a;
+    int b;
+    
+    // When
+    rb.enqueue(1);
+    TinyRingBufferStatus sts1 = rb.dequeue(&a);
+    rb.enqueue(2);
+    TinyRingBufferStatus sts2 = rb.dequeue(&b);
+
+    // Then
+    CHECK(sts1 == TinyRingBufferStatus::SUCCESS);
+    CHECK(sts2 == TinyRingBufferStatus::SUCCESS);
+
+    CHECK(rb.empty());
+    CHECK(rb.count() == 0);
+    CHECK(rb.length() >= 1);
+    CHECK(a == 1);
+    CHECK(b == 2);
+}
+
+TEST_CASE("Move Constructor")
+{
+    // Given
+    TinyRingBuffer<int> rb1{1};
+    rb1.enqueue(1);
+    
+    // When
+    TinyRingBuffer<int> rb2{std::move(rb1)};
+    
+    // Then
+    CHECK(rb1.empty());
+    CHECK(rb2.count() == 1);
+    int a;
+    rb2.dequeue(&a);
+    CHECK(a == 1);
+}
+
+TEST_CASE("Move Assignment")
+{
+    // Given
+    TinyRingBuffer<int> rb1{1};
+    TinyRingBuffer<int> rb2;
+    rb1.enqueue(1);
+    
+    // When
+    rb2 = std::move(rb1);
+    
+    // Then
+    CHECK(rb1.empty());
+    CHECK(rb2.count() == 1);
+    int a;
+    rb2.dequeue(&a);
+    CHECK(a == 1);
 }
 
 #ifdef PERFTEST
