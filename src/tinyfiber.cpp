@@ -32,6 +32,7 @@ SOFTWARE.
 #include <condition_variable>
 #include <mutex>
 #include <cstdint>
+#include <iostream>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -39,9 +40,7 @@ SOFTWARE.
 #define VC_EXTRALEAN
 #include <Windows.h>
 #include <synchapi.h>
-#define OS_API __stdcall
 #else
-#define OS_API
 #include <ucontext.h>
 #endif
 
@@ -69,14 +68,16 @@ struct TfbContext
     std::atomic_bool should_exit;
     std::mutex pending_jobs_mx;
     std::atomic_int64_t no_of_pending_jobs;
-    std::atomic<FIBER_TYPE> main_fiber; // Main fiber will be stored here and switched to by one worker thread
+    
     FIBER_TYPE worker_threads_fiber; // Main thread will run this fiber and wait for worker threads
 #ifdef _WIN32
+    // Todo: can we avoid atomic on windows ?
+    std::atomic<FIBER_TYPE> main_fiber; // Main fiber will be stored here and switched to by one worker thread
     static thread_local void* l_worker_fiber;
     static thread_local void* l_finished_fiber;
     static thread_local PSRWLOCK l_wait_handle_lock;
 #else
-
+    FIBER_TYPE main_fiber; // No need for atomic for posix
 #endif
 };
 
@@ -84,7 +85,9 @@ struct TfbContext
 thread_local void* TfbContext::l_worker_fiber;
 thread_local void* TfbContext::l_finished_fiber;
 thread_local PSRWLOCK TfbContext::l_wait_handle_lock;
+#define FIBER_FUNCTION(X) void __stdcall X (void *)
 #else
+#define FIBER_FUNCTION(X) void X (void)
 char FIBER_STACKS[TFB_DEFAULT_STACKSIZE * (TFB_NUMBER_OF_FIBERS + 1)]; // worker_threads_fiber + 1
 #endif
 
@@ -92,7 +95,7 @@ namespace
 {
 thread_local TfbContext* l_my_fiber_system;
 
-static void OS_API fiber_main_loop(void* fiber_system)
+static FIBER_FUNCTION(fiber_main_loop)
 {
 #ifdef _WIN32
     if (fiber_system == nullptr)
@@ -195,7 +198,7 @@ static int worker_function(TfbContext& fs)
     return 0;
 }
 
-static void OS_API start_workers(void* fiber_system)
+static FIBER_FUNCTION(start_workers)
 {
 #ifdef _WIN32
     if (fiber_system == nullptr)
@@ -261,7 +264,7 @@ int tfb_init_ext(TfbContext** fiber_system, int max_threads)
 
         if (fiber == nullptr)
         {
-            // todo: Free
+            // Todo: Free
             DWORD err = GetLastError();
             return -1;
         }
@@ -279,21 +282,21 @@ int tfb_init_ext(TfbContext** fiber_system, int max_threads)
         ucontext_t context;
         if (getcontext(&context) == -1)
         {
-            // todo: Free
+            // Todo: Free
             return -1;
         }
         context.uc_stack.ss_sp = FIBER_STACKS + TFB_DEFAULT_STACKSIZE * i;
         context.uc_stack.ss_size = TFB_DEFAULT_STACKSIZE;
-        makecontext(&context, fiber_main_loop, 1, fs);
+        makecontext(&context, fiber_main_loop, 0);
         fs->fiber_pool.enqueue(context);
     }
     getcontext(&fs->main_fiber);
-
     getcontext(&fs->worker_threads_fiber);
     fs->worker_threads_fiber.uc_stack.ss_sp = FIBER_STACKS + TFB_DEFAULT_STACKSIZE * TFB_NUMBER_OF_FIBERS;
     fs->worker_threads_fiber.uc_stack.ss_size = TFB_DEFAULT_STACKSIZE;
-    makecontext(&fs->worker_threads_fiber, start_workers, fs);
-    switchcontext(&fs->main_fiber, &fs->worker_threads_fiber);
+    fs->worker_threads_fiber.uc_link = &fs->main_fiber;
+    makecontext(&fs->worker_threads_fiber, start_workers, 0);
+    swapcontext(&fs->main_fiber, &fs->worker_threads_fiber);
 #endif
     return 0;
 }
