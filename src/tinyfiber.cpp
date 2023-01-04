@@ -31,7 +31,7 @@ SOFTWARE.
 #include <algorithm>
 #include <condition_variable>
 #include <mutex>
-#include <stdint.h>
+#include <cstdint>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -39,35 +39,44 @@ SOFTWARE.
 #define VC_EXTRALEAN
 #include <Windows.h>
 #include <synchapi.h>
+#define OS_API __stdcall
 #else
-#define __stdcall
+#define OS_API
+#include <ucontext.h>
 #endif
 
 using utils::TinyRingBuffer;
 using utils::TinyRingBufferStatus;
 
+#ifdef _WIN32
 const int TFB_DEFAULT_STACKSIZE = 0;
+#define FIBER_TYPE void*
+#else
+const int TFB_DEFAULT_STACKSIZE = 8192;
+#define FIBER_TYPE ucontext_t
+#endif
 const int TFB_MAX_NUMBER_OF_THREADS = 256;
 const int TFB_NUMBER_OF_FIBERS = 1024;
-const int TFB_FIBER_POOL_SIZE = 1024;
 const int TFB_JOB_QUEUE_SIZE = 1024;
 
 struct TfbContext
 {
     TinyRingBuffer<TfbJobDeclaration> job_queue;
-    TinyRingBuffer<void*> fiber_pool;
+    TinyRingBuffer<FIBER_TYPE> fiber_pool;
     std::condition_variable no_job_cv;
     std::thread worker_threads[TFB_MAX_NUMBER_OF_THREADS];
     int no_of_worker_threads = 0;
     std::atomic_bool should_exit;
     std::mutex pending_jobs_mx;
     std::atomic_int64_t no_of_pending_jobs;
-    std::atomic<void*> main_fiber;
-    void* init_fibers_fiber = nullptr;
+    std::atomic<FIBER_TYPE> main_fiber; // Main fiber will be stored here and switched to by one worker thread
+    FIBER_TYPE worker_threads_fiber; // Main thread will run this fiber and wait for worker threads
 #ifdef _WIN32
     static thread_local void* l_worker_fiber;
     static thread_local void* l_finished_fiber;
     static thread_local PSRWLOCK l_wait_handle_lock;
+#else
+
 #endif
 };
 
@@ -75,13 +84,15 @@ struct TfbContext
 thread_local void* TfbContext::l_worker_fiber;
 thread_local void* TfbContext::l_finished_fiber;
 thread_local PSRWLOCK TfbContext::l_wait_handle_lock;
+#else
+char FIBER_STACKS[TFB_DEFAULT_STACKSIZE * (TFB_NUMBER_OF_FIBERS + 1)]; // worker_threads_fiber + 1
 #endif
 
 namespace
 {
 thread_local TfbContext* l_my_fiber_system;
 
-static void __stdcall fiber_main_loop(void* fiber_system)
+static void OS_API fiber_main_loop(void* fiber_system)
 {
 #ifdef _WIN32
     if (fiber_system == nullptr)
@@ -102,7 +113,7 @@ static void __stdcall fiber_main_loop(void* fiber_system)
         {
             {
                 std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
-                --fs.no_of_pending_jobs;
+                fs.no_of_pending_jobs--;
             }
 
             jb.func(jb.user_data);
@@ -184,7 +195,7 @@ static int worker_function(TfbContext& fs)
     return 0;
 }
 
-static void __stdcall start_workers(void* fiber_system)
+static void OS_API start_workers(void* fiber_system)
 {
 #ifdef _WIN32
     if (fiber_system == nullptr)
@@ -192,25 +203,29 @@ static void __stdcall start_workers(void* fiber_system)
 
     TfbContext& fs = *(TfbContext*)fiber_system;
     // First worker will start at main fiber
-    fs.worker_threads[0] = std::thread([&fs] {
-        l_my_fiber_system = &fs;
-        fs.l_worker_fiber = ConvertThreadToFiber(nullptr);
-        SwitchToFiber(fs.main_fiber);
-        if (fs.l_finished_fiber != nullptr)
-            fs.fiber_pool.enqueue(fs.l_finished_fiber);
-        fs.l_finished_fiber = nullptr;
-        ConvertFiberToThread();
-    });
+    fs.worker_threads[0] = std::thread(
+        [&fs]
+        {
+            l_my_fiber_system = &fs;
+            fs.l_worker_fiber = ConvertThreadToFiber(nullptr);
+            SwitchToFiber(fs.main_fiber);
+            if (fs.l_finished_fiber != nullptr)
+                fs.fiber_pool.enqueue(fs.l_finished_fiber);
+            fs.l_finished_fiber = nullptr;
+            ConvertFiberToThread();
+        });
 
     // Other workers will start with worker_function
     for (int i = 1; i < fs.no_of_worker_threads; ++i)
     {
-        fs.worker_threads[i] = std::thread([&fs] {
-            l_my_fiber_system = &fs;
-            fs.l_worker_fiber = ConvertThreadToFiber(nullptr);
-            worker_function(fs); // todo(markusl): handle return error code
-            ConvertFiberToThread();
-        });
+        fs.worker_threads[i] = std::thread(
+            [&fs]
+            {
+                l_my_fiber_system = &fs;
+                fs.l_worker_fiber = ConvertThreadToFiber(nullptr);
+                worker_function(fs); // todo(markusl): handle return error code
+                ConvertFiberToThread();
+            });
     }
 
     // Wait for worker threads to exit
@@ -226,44 +241,59 @@ static void __stdcall start_workers(void* fiber_system)
 
 int tfb_init_ext(TfbContext** fiber_system, int max_threads)
 {
-#ifdef _WIN32
     TfbContext* fs = new TfbContext();
     l_my_fiber_system = fs;
     if (fiber_system != nullptr)
         *fiber_system = fs;
 
-    // Init pools etc.
-    fs->job_queue.init(TFB_JOB_QUEUE_SIZE);
-    fs->fiber_pool.init(TFB_FIBER_POOL_SIZE);
-
-    // -1 since main thread counts
+    fs->job_queue = TinyRingBuffer<TfbJobDeclaration>(TFB_JOB_QUEUE_SIZE);
+    fs->fiber_pool = TinyRingBuffer<FIBER_TYPE>(TFB_NUMBER_OF_FIBERS);
     fs->no_of_worker_threads = std::thread::hardware_concurrency();
     fs->no_of_worker_threads = std::min(fs->no_of_worker_threads, TFB_MAX_NUMBER_OF_THREADS);
 
     if (max_threads != TFB_ALL_CORES)
         fs->no_of_worker_threads = std::min(fs->no_of_worker_threads, max_threads);
 
-    void** allocated_fibers = nullptr;
-    if (fs->fiber_pool.allocate(TFB_NUMBER_OF_FIBERS, &allocated_fibers) != TinyRingBufferStatus::SUCCESS)
-        return -1;
-
+#ifdef _WIN32
     for (int i = 0; i < TFB_NUMBER_OF_FIBERS; ++i)
     {
         void* fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, fiber_main_loop, fs);
+
         if (fiber == nullptr)
         {
-            // DWORD err = GetLastError();
-            // todo(markusl): free
+            // todo: Free
+            DWORD err = GetLastError();
             return -1;
         }
-        allocated_fibers[i] = fiber;
+        fs->fiber_pool.enqueue(fiber);
     }
 
     // Switch away from main thread and start worker system
     fs->main_fiber = ConvertThreadToFiber(nullptr);
-    fs->init_fibers_fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, start_workers, fs);
-    SwitchToFiber(fs->init_fibers_fiber); // Lose main fiber from main thread
+    fs->worker_threads_fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, start_workers, fs);
+    SwitchToFiber(fs->worker_threads_fiber); // Lose main fiber from main thread
     // Worker thread will execute from here now
+#else
+    for (int i = 0; i < TFB_NUMBER_OF_FIBERS; ++i)
+    {
+        ucontext_t context;
+        if (getcontext(&context) == -1)
+        {
+            // todo: Free
+            return -1;
+        }
+        context.uc_stack.ss_sp = FIBER_STACKS + TFB_DEFAULT_STACKSIZE * i;
+        context.uc_stack.ss_size = TFB_DEFAULT_STACKSIZE;
+        makecontext(&context, fiber_main_loop, 1, fs);
+        fs->fiber_pool.enqueue(context);
+    }
+    getcontext(&fs->main_fiber);
+
+    getcontext(&fs->worker_threads_fiber);
+    fs->worker_threads_fiber.uc_stack.ss_sp = FIBER_STACKS + TFB_DEFAULT_STACKSIZE * TFB_NUMBER_OF_FIBERS;
+    fs->worker_threads_fiber.uc_stack.ss_size = TFB_DEFAULT_STACKSIZE;
+    makecontext(&fs->worker_threads_fiber, start_workers, fs);
+    switchcontext(&fs->main_fiber, &fs->worker_threads_fiber);
 #endif
     return 0;
 }

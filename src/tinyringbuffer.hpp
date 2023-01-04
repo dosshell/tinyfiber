@@ -137,6 +137,16 @@ public:
         m_used_bytes += byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
+#else
+        std::scoped_lock lock(m_mutex);
+        if (m_count + elements > m_buffer.size())
+            return TinyRingBufferStatus::BUFFER_FULL;
+        for (int64_t i = 0; i < elements; ++i)
+        {
+            auto sts = enqueue(src[i]);
+            if (sts != TinyRingBufferStatus::SUCCESS)
+                return sts;
+        }
 #endif
         return TinyRingBufferStatus::SUCCESS;
     }
@@ -173,7 +183,7 @@ public:
         return TinyRingBufferStatus::SUCCESS;
     }
 
-    TinyRingBufferStatus dequeue(T* dst, int64_t elements)
+    TinyRingBufferStatus dequeue(T* dst, int64_t elements, int64_t* elements_dequeued)
     {
 #ifdef _WIN32
         const int64_t byte_size = (int64_t)sizeof(T) * elements;
@@ -193,6 +203,17 @@ public:
         m_used_bytes -= byte_size;
 
         ReleaseSRWLockExclusive(&m_lock);
+#else
+        std::scoped_lock lock(m_mutex);
+
+        for (int64_t i = 0; i < elements; ++i)
+        {
+            auto sts = dequeue(dst[i]);
+            if (sts != TinyRingBufferStatus::SUCCESS)
+                return sts;
+            if (elements_dequeued != nullptr)
+                elements_dequeued--;
+        }
 #endif
         return TinyRingBufferStatus::SUCCESS;
     }
