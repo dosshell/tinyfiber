@@ -60,23 +60,17 @@ void recursive_job(void* param)
 TEST_CASE("tinyfiber init/deinit simple")
 {
     // Given
-    auto start_id = std::this_thread::get_id();
-    REQUIRE(tfb_init() == 0);
-    auto run_id = std::this_thread::get_id();
 
     // When
-    int sts = tfb_free();
-
+    int start_id = tfb_thread_id();
+    REQUIRE(tfb_init() == 0);
+    int run_id = tfb_thread_id();
+    REQUIRE(tfb_free() == 0);
+    int stop_id = tfb_thread_id(); 
     // Then
-    std::stringstream ss_start_id; // warning C4717
-    std::stringstream ss_run_id;
-    ss_start_id << start_id;
-    ss_run_id << run_id;
-    CHECK(ss_start_id.str() != ss_run_id.str());
-    std::stringstream ss_now_id;
-    ss_now_id << std::this_thread::get_id();
-    CHECK(ss_now_id.str() == ss_start_id.str());
-    CHECK(sts == 0);
+    
+    CHECK(start_id != run_id);
+    CHECK(start_id == stop_id);
 }
 #if 0
 TEST_CASE("tinyfiber init ext")

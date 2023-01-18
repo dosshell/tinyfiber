@@ -205,15 +205,26 @@ public:
         ReleaseSRWLockExclusive(&m_lock);
 #else
         std::scoped_lock lock(m_mutex);
+      
+        if (elements_dequeued != nullptr)
+          *elements_dequeued = 0; 
 
-        for (int64_t i = 0; i < elements; ++i)
+        if (m_count <= 0)
+            return TinyRingBufferStatus::BUFFER_EMPTY;
+
+        int64_t try_dequeue = std::min(m_count, elements);
+
+        for (int64_t n = 0; n < try_dequeue; ++n)
         {
-            auto sts = dequeue(dst[i]);
-            if (sts != TinyRingBufferStatus::SUCCESS)
-                return sts;
-            if (elements_dequeued != nullptr)
-                elements_dequeued--;
+            int64_t i = m_tail;
+            m_tail = (m_tail + 1) % m_buffer.size();
+            if (dst)
+                dst[n] = m_buffer[i];
+            m_count--;
         }
+
+        if (elements_dequeued != nullptr)
+            *elements_dequeued = try_dequeue;
 #endif
         return TinyRingBufferStatus::SUCCESS;
     }
@@ -293,7 +304,7 @@ private:
         if (m_buffer == nullptr)
             return TinyRingBufferStatus::MEMORY_ERROR;
 #else
-        std::unique_lock lock(m_mutex);
+        std::scoped_lock lock(m_mutex);
         m_buffer.resize(buffer_length);
 #endif
         return TinyRingBufferStatus::SUCCESS;
@@ -321,7 +332,7 @@ private:
             m_handle = nullptr;
         }
 #else
-        std::unique_lock lock(m_mutex);
+        std::scoped_lock lock(m_mutex);
         m_head = 0;
         m_tail = 0;
         m_count = 0;

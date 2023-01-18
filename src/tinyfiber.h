@@ -27,7 +27,12 @@ SOFTWARE.
 
 #include <stdint.h>
 #include <stddef.h>
-
+#ifndef _WIN32
+#include <mutex>
+#include <optional>
+#include <atomic>
+#include <ucontext.h>
+#endif
 #ifdef __cplusplus
 extern "C"
 {
@@ -35,13 +40,21 @@ extern "C"
     typedef struct TfbContext TfbContext;
 
     // Internal structure, init to zero to use. Writes will result in UF
+#ifdef _WIN32
     typedef struct
     {
         void* _fiber;
-        int64_t _counter;
+        std::atomic_int64_t _counter;
         void* _lock;
     } TfbWaitHandle;
-
+#else
+    typedef struct
+    {
+        ucontext_t* _fiber;
+        std::atomic_int64_t _counter;
+        std::mutex _lock;
+    } TfbWaitHandle;
+#endif
     typedef struct
     {
         void (*func)(void*);
@@ -50,8 +63,6 @@ extern "C"
     } TfbJobDeclaration;
 
     const int TFB_ALL_CORES = 0;
-    TfbContext* const TFB_MY_CONTEXT = NULL;
-    TfbContext** const TFB_DEFAULT_CONTEXT = NULL;
 
     /**
      * @brief Creates a new fiber system context.
@@ -68,39 +79,18 @@ extern "C"
      * @see tfb_init()
      * @see rfb_free_ext()
      */
-    int tfb_init_ext(TfbContext** fiber_system, int max_threads);
+    int tfb_init_ext(int max_threads);
 
     inline int tfb_init()
     {
-        return tfb_init_ext(TFB_DEFAULT_CONTEXT, TFB_ALL_CORES);
+        return tfb_init_ext(TFB_ALL_CORES);
     }
 
-    int tfb_free_ext(TfbContext** fiber_system);
+    int tfb_free();
 
-    inline int tfb_free()
-    {
-        return tfb_free_ext(TFB_DEFAULT_CONTEXT);
-    }
+    int tfb_add_jobdecl(TfbJobDeclaration* job_declaration);
 
-    int tfb_add_jobdecl_ext(TfbContext* fiber_system, TfbJobDeclaration* job_declaration);
-
-    inline int tfb_add_jobdecl(TfbJobDeclaration* job_declaration)
-    {
-        return tfb_add_jobdecl_ext(TFB_MY_CONTEXT, job_declaration);
-    }
-
-    int tfb_add_jobdecls_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements);
-
-    inline int tfb_add_jobdecls(TfbJobDeclaration jobs[], int64_t elements)
-    {
-        return tfb_add_jobdecls_ext(TFB_MY_CONTEXT, jobs, elements);
-    }
-
-    inline int tfb_add_job_ext(TfbContext* fiber_system, void (*func)(void*), void* user_data, TfbWaitHandle* wh)
-    {
-        TfbJobDeclaration job = {func, user_data, wh};
-        return tfb_add_jobdecl_ext(fiber_system, &job);
-    }
+    int tfb_add_jobdecls(TfbJobDeclaration jobs[], int64_t elements);
 
     inline int tfb_add_job(void (*func)(void*), void* user_data, TfbWaitHandle* wh)
     {
@@ -108,12 +98,9 @@ extern "C"
         return tfb_add_jobdecl(&job);
     }
 
-    int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle* wait_handle);
+    int tfb_await(TfbWaitHandle* wait_handle);
 
-    inline int tfb_await(TfbWaitHandle* wait_handle)
-    {
-        return tfb_await_ext(TFB_MY_CONTEXT, wait_handle);
-    }
+    int tfb_thread_id();
 
 #ifdef __cplusplus
 }

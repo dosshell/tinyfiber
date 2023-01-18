@@ -1,9 +1,9 @@
 /*
-MIT License
+MIT Licenserelease of the first text-to-speech (TTS) modelrelease of the first text-to-speech (TTS) model
 
 Copyright (c) 2020 Markus Lindelöw
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
+Permission is hereby granted, free of charge, to any person obtaining a copy                                                        
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
@@ -48,15 +48,27 @@ using utils::TinyRingBuffer;
 using utils::TinyRingBufferStatus;
 
 #ifdef _WIN32
-const int TFB_DEFAULT_STACKSIZE = 0;
+const int TFB_DEFAULT_STACK_SIZE = 0;
 #define FIBER_TYPE void*
+#define LOCK_TYPE SRWLOCK
+#define FIBER_FUNCTION(X) void __stdcall X(void*)
+typedef void (*__stdcall FIBER_FUNC_TYPE)(void*);
 #else
-const int TFB_DEFAULT_STACKSIZE = 8192;
-#define FIBER_TYPE ucontext_t
+const int TFB_DEFAULT_STACK_SIZE = 8192; // * 1024
+#define FIBER_TYPE ucontext_t*
+#define LOCK_TYPE std::mutex
+#define FIBER_FUNCTION(X) void X(void)
+typedef void (*FIBER_FUNC_TYPE)(void);
 #endif
 const int TFB_MAX_NUMBER_OF_THREADS = 256;
 const int TFB_NUMBER_OF_FIBERS = 1024;
 const int TFB_JOB_QUEUE_SIZE = 1024;
+
+#ifdef NDEBUG
+#define LOG(X)
+#else
+#define LOG(X) std::cout << std::this_thread::get_id() << "; " << g_fs.l_thread_number << "; " << __FUNCTION__ << "; " << X << std::endl;
+#endif
 
 struct TfbContext
 {
@@ -64,362 +76,434 @@ struct TfbContext
     TinyRingBuffer<FIBER_TYPE> fiber_pool;
     std::condition_variable no_job_cv;
     std::thread worker_threads[TFB_MAX_NUMBER_OF_THREADS];
-    int no_of_worker_threads = 0;
+    int no_of_worker_threads;
     std::atomic_bool should_exit;
     std::mutex pending_jobs_mx;
     std::atomic_int64_t no_of_pending_jobs;
-    
-    FIBER_TYPE worker_threads_fiber; // Main thread will run this fiber and wait for worker threads
-#ifdef _WIN32
-    // Todo: can we avoid atomic on windows ?
-    std::atomic<FIBER_TYPE> main_fiber; // Main fiber will be stored here and switched to by one worker thread
-    static thread_local void* l_worker_fiber;
-    static thread_local void* l_finished_fiber;
-    static thread_local PSRWLOCK l_wait_handle_lock;
-#else
-    FIBER_TYPE main_fiber; // No need for atomic for posix
+    std::atomic<FIBER_TYPE> main_fiber;       // Atomic?
+    FIBER_TYPE start_workers_fiber = nullptr; // Main thread will run this fiber and wait for worker threads
+    static std::atomic_int64_t thread_number_counter;
+    static thread_local FIBER_TYPE l_worker_fiber;
+    static thread_local FIBER_TYPE l_finished_fiber;
+    static thread_local LOCK_TYPE* l_wait_handle_lock;
+    static thread_local std::int64_t l_thread_number;
+#ifndef _WIN32
+    static thread_local FIBER_TYPE l_current_fiber;
+    std::atomic_int64_t fibers_used = 0;
+    ucontext_t fibers[TFB_NUMBER_OF_FIBERS + TFB_MAX_NUMBER_OF_THREADS + 1];
+    char stacks[TFB_DEFAULT_STACK_SIZE * (TFB_NUMBER_OF_FIBERS + TFB_MAX_NUMBER_OF_THREADS + 1)];
 #endif
 };
 
-#ifdef _WIN32
-thread_local void* TfbContext::l_worker_fiber;
-thread_local void* TfbContext::l_finished_fiber;
-thread_local PSRWLOCK TfbContext::l_wait_handle_lock;
-#define FIBER_FUNCTION(X) void __stdcall X (void *)
-#else
-#define FIBER_FUNCTION(X) void X (void)
-char FIBER_STACKS[TFB_DEFAULT_STACKSIZE * (TFB_NUMBER_OF_FIBERS + 1)]; // worker_threads_fiber + 1
+thread_local FIBER_TYPE TfbContext::l_worker_fiber;
+thread_local FIBER_TYPE TfbContext::l_finished_fiber;
+thread_local LOCK_TYPE* TfbContext::l_wait_handle_lock;
+std::atomic_int64_t TfbContext::thread_number_counter;
+thread_local std::int64_t TfbContext::l_thread_number;
+
+#ifndef _WIN32
+thread_local FIBER_TYPE TfbContext::l_current_fiber;
 #endif
 
 namespace
 {
-thread_local TfbContext* l_my_fiber_system;
+TfbContext g_fs;
+
+FIBER_TYPE create_fiber(FIBER_FUNC_TYPE func)
+{
+#ifdef _WIN32
+    return CreateFiber(TFB_DEFAULT_STACK_SIZE, func, nullptr);
+#else
+    int64_t n = g_fs.fibers_used++;
+    getcontext(&g_fs.fibers[n]);
+    g_fs.fibers[n].uc_stack.ss_sp = reinterpret_cast<void*>(&g_fs.stacks[n * TFB_DEFAULT_STACK_SIZE]);
+    g_fs.fibers[n].uc_stack.ss_size = TFB_DEFAULT_STACK_SIZE;
+    makecontext(&g_fs.fibers[n], func, 0);
+    return &g_fs.fibers[n];
+#endif
+}
+
+void switch_to_fiber(FIBER_TYPE fiber)
+{
+#ifdef _WIN32
+    SwitchToFiber(fiber);
+#else
+    FIBER_TYPE previous_fiber = g_fs.l_current_fiber;
+    g_fs.l_current_fiber = fiber;
+    swapcontext(previous_fiber, fiber);
+#endif
+}
+
+FIBER_TYPE get_current_fiber()
+{
+#ifdef _WIN32
+    return GetCurrentFiber();
+#else
+    return g_fs.l_current_fiber;
+#endif
+}
+
+FIBER_TYPE convert_thread_to_fiber()
+{
+#ifdef _WIN32
+    return ConvertThreadToFiber(nullptr);
+#else
+    int64_t n = g_fs.fibers_used++;
+    getcontext(&g_fs.fibers[n]);
+    g_fs.l_current_fiber = &g_fs.fibers[n];
+    return &g_fs.fibers[n];
+#endif
+}
+
+void convert_fiber_to_thread()
+{
+#ifdef _WIN32
+    ConvertFiberToThread();
+#else
+#endif
+}
+
+void delete_fiber(FIBER_TYPE fiber)
+{
+#ifdef _WIN32
+    DeleteFiber(fiber);
+#else
+#endif
+}
+void lock(LOCK_TYPE& lock)
+{
+#ifdef _WIN32
+    AcquireSRWLockExclusive(&lock);
+#else
+    lock.lock();
+#endif
+}
+
+void unlock(LOCK_TYPE& lock)
+{
+#ifdef _WIN32
+    ReleaseSRWLockExclusive(&lock);
+#else
+    lock.unlock();
+#endif
+}
+
+void init_lock(LOCK_TYPE& lock)
+{
+#ifdef _WIN32
+    lock = SRWLOCK_INIT;
+#else
+#endif
+}
 
 static FIBER_FUNCTION(fiber_main_loop)
 {
-#ifdef _WIN32
-    if (fiber_system == nullptr)
-        return;
-
-    TfbContext& fs = *(TfbContext*)fiber_system;
+    LOG("Enter");
     while (true)
     {
         // allow to resume await fiber now, after we have switched from it
-        if (fs.l_wait_handle_lock != nullptr)
+        if (g_fs.l_wait_handle_lock != nullptr)
         {
-            ReleaseSRWLockExclusive(fs.l_wait_handle_lock);
-            fs.l_wait_handle_lock = nullptr;
+            unlock(*g_fs.l_wait_handle_lock);
+            g_fs.l_wait_handle_lock = nullptr;
         }
 
         TfbJobDeclaration jb;
-        if (!fs.should_exit && fs.job_queue.dequeue(&jb) == TinyRingBufferStatus::SUCCESS)
+        if (!g_fs.should_exit && g_fs.job_queue.dequeue(&jb) == TinyRingBufferStatus::SUCCESS)
         {
             {
-                std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
-                fs.no_of_pending_jobs--;
+                std::scoped_lock<std::mutex> lk(g_fs.pending_jobs_mx);
+                g_fs.no_of_pending_jobs--;
             }
 
             jb.func(jb.user_data);
-            fs.l_finished_fiber = GetCurrentFiber();
+            g_fs.l_finished_fiber = get_current_fiber();
 
             // Take care of waiting
             if (jb.wait_handle != nullptr)
             {
-                AcquireSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock);
+                lock(jb.wait_handle->_lock);
 
-                reinterpret_cast<std::atomic_int64_t&>(jb.wait_handle->_counter)--;
+                int64_t n = --(jb.wait_handle->_counter);
 
                 // if we are last and someone is waiting for us, yield to it
-                if (reinterpret_cast<std::atomic_int64_t&>(jb.wait_handle->_counter).load() == 0)
+                if (n == 0)
                 {
-                    void* fiber = jb.wait_handle->_fiber;
+                    FIBER_TYPE fiber = jb.wait_handle->_fiber;
 
                     // A fiber is waiting for us
                     if (fiber != nullptr)
                     {
                         jb.wait_handle->_fiber = nullptr;
-                        ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock); // allow other jobs to await
-                        SwitchToFiber(fiber);                                      // yield back to awaiter fiber, await will put us back at pool
+                        unlock(jb.wait_handle->_lock);
+                        switch_to_fiber(fiber); // yield back to awaiter fiber, await will put us back at pool
                     }
                     else
                     {
                         // No one is awaiting for us
-                        ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock);
+                        unlock(jb.wait_handle->_lock);
                     }
                 }
                 else
                 {
                     // There may be more jobs for us
-                    ReleaseSRWLockExclusive((PSRWLOCK)&jb.wait_handle->_lock);
+                    unlock(jb.wait_handle->_lock);
                 }
             }
         }
         else
         {
             // There are no jobs for us or exit is requested, return to worker fiber whom can block us
-            fs.l_finished_fiber = GetCurrentFiber();
-            SwitchToFiber(fs.l_worker_fiber); // worker fiber will put us back to pool
+            g_fs.l_finished_fiber = get_current_fiber();
+            switch_to_fiber(g_fs.l_worker_fiber);
         }
     }
-#endif
 }
 
-static int worker_function(TfbContext& fs)
+static int worker_function()
 {
-#ifdef _WIN32
-    while (!fs.should_exit)
+    while (!g_fs.should_exit)
     {
-        if (fs.no_of_pending_jobs > 0)
+        if (g_fs.no_of_pending_jobs > 0)
         {
-            void* work_fiber;
-            TinyRingBufferStatus sts = fs.fiber_pool.dequeue(&work_fiber);
+            FIBER_TYPE work_fiber;
+            TinyRingBufferStatus sts = g_fs.fiber_pool.dequeue(&work_fiber);
 
             if (sts == TinyRingBufferStatus::SUCCESS)
             {
-                SwitchToFiber(work_fiber);
-                if (fs.l_finished_fiber != nullptr)
+                switch_to_fiber(work_fiber);
+                if (g_fs.l_finished_fiber != nullptr)
                 {
-                    fs.fiber_pool.enqueue(fs.l_finished_fiber);
-                    fs.l_finished_fiber = nullptr;
+                    g_fs.fiber_pool.enqueue(g_fs.l_finished_fiber);
+                    g_fs.l_finished_fiber = nullptr;
                 }
             }
             else
             {
-                return -1; // no more fibers in the pool
+                LOG("No more fibers in the pool");
+                return -1;
             }
         }
         else
         {
-            std::unique_lock<std::mutex> lk(fs.pending_jobs_mx);
-            fs.no_job_cv.wait(lk, [&] { return fs.no_of_pending_jobs > 0 || fs.should_exit; });
+            std::unique_lock<std::mutex> lk(g_fs.pending_jobs_mx);
+            g_fs.no_job_cv.wait(lk, [&] { return g_fs.no_of_pending_jobs > 0 || g_fs.should_exit; });
         }
     }
-#endif
+
     return 0;
 }
 
 static FIBER_FUNCTION(start_workers)
 {
-#ifdef _WIN32
-    if (fiber_system == nullptr)
-        return;
-
-    TfbContext& fs = *(TfbContext*)fiber_system;
+    LOG("called.");
     // First worker will start at main fiber
-    fs.worker_threads[0] = std::thread(
-        [&fs]
+    g_fs.worker_threads[0] = std::thread(
+        [&]
         {
-            l_my_fiber_system = &fs;
-            fs.l_worker_fiber = ConvertThreadToFiber(nullptr);
-            SwitchToFiber(fs.main_fiber);
-            if (fs.l_finished_fiber != nullptr)
-                fs.fiber_pool.enqueue(fs.l_finished_fiber);
-            fs.l_finished_fiber = nullptr;
-            ConvertFiberToThread();
+            g_fs.l_thread_number = g_fs.thread_number_counter++;
+            LOG("Started");
+            g_fs.l_worker_fiber = nullptr;
+            g_fs.l_finished_fiber = nullptr;
+            g_fs.l_wait_handle_lock = nullptr;
+#ifndef _WIN32
+            g_fs.l_current_fiber = nullptr;
+#endif
+
+            g_fs.l_worker_fiber = convert_thread_to_fiber();
+            LOG("Switch: Main-worker-thread to main fiber");
+            switch_to_fiber(g_fs.main_fiber);
+
+            if (g_fs.l_finished_fiber != nullptr)
+            {
+                g_fs.fiber_pool.enqueue(g_fs.l_finished_fiber);
+                g_fs.l_finished_fiber = nullptr;
+            }
+            convert_fiber_to_thread();
+            delete_fiber(g_fs.l_worker_fiber);
         });
 
     // Other workers will start with worker_function
-    for (int i = 1; i < fs.no_of_worker_threads; ++i)
+    for (int i = 1; i < g_fs.no_of_worker_threads; ++i)
     {
-        fs.worker_threads[i] = std::thread(
-            [&fs]
+        g_fs.worker_threads[i] = std::thread(
+            [&]
             {
-                l_my_fiber_system = &fs;
-                fs.l_worker_fiber = ConvertThreadToFiber(nullptr);
-                worker_function(fs); // todo(markusl): handle return error code
-                ConvertFiberToThread();
+                g_fs.l_thread_number = g_fs.thread_number_counter++;
+                LOG("Started");
+                g_fs.l_worker_fiber = nullptr;
+                g_fs.l_finished_fiber = nullptr;
+                g_fs.l_wait_handle_lock = nullptr;
+#ifndef _WIN32
+                g_fs.l_current_fiber = nullptr;
+#endif
+                g_fs.l_worker_fiber = convert_thread_to_fiber();
+                worker_function(); // todo(markusl): handle return error code
+                convert_fiber_to_thread();
+                delete_fiber(g_fs.l_worker_fiber);
             });
     }
 
+    LOG("Wait for join");
     // Wait for worker threads to exit
-    for (int i = 0; i < fs.no_of_worker_threads; ++i)
+    for (int i = 0; i < g_fs.no_of_worker_threads; ++i)
     {
-        fs.worker_threads[i].join();
+        g_fs.worker_threads[i].join();
     }
-    SwitchToFiber(fs.main_fiber);
-#endif
+    LOG("Joined. Switching back main-fiber");
+    switch_to_fiber(g_fs.main_fiber);
 }
 
 } // namespace
 
-int tfb_init_ext(TfbContext** fiber_system, int max_threads)
+int tfb_init_ext(int max_threads)
 {
-    TfbContext* fs = new TfbContext();
-    l_my_fiber_system = fs;
-    if (fiber_system != nullptr)
-        *fiber_system = fs;
+    g_fs.l_thread_number = g_fs.thread_number_counter++;
+    LOG("called.");
 
-    fs->job_queue = TinyRingBuffer<TfbJobDeclaration>(TFB_JOB_QUEUE_SIZE);
-    fs->fiber_pool = TinyRingBuffer<FIBER_TYPE>(TFB_NUMBER_OF_FIBERS);
-    fs->no_of_worker_threads = std::thread::hardware_concurrency();
-    fs->no_of_worker_threads = std::min(fs->no_of_worker_threads, TFB_MAX_NUMBER_OF_THREADS);
+    g_fs.job_queue = TinyRingBuffer<TfbJobDeclaration>(TFB_JOB_QUEUE_SIZE);
+    g_fs.fiber_pool = TinyRingBuffer<FIBER_TYPE>(TFB_NUMBER_OF_FIBERS);
+    g_fs.main_fiber = nullptr;
+    g_fs.should_exit = false;
+    g_fs.no_of_pending_jobs = 0;
+    g_fs.start_workers_fiber = nullptr;
+#ifndef _WIN32
+    g_fs.fibers_used = 0;
+#endif
+
+    g_fs.no_of_worker_threads = std::thread::hardware_concurrency();
+    g_fs.no_of_worker_threads = std::min(g_fs.no_of_worker_threads, TFB_MAX_NUMBER_OF_THREADS);
+    // DEBUG
+    g_fs.no_of_worker_threads = 1;
 
     if (max_threads != TFB_ALL_CORES)
-        fs->no_of_worker_threads = std::min(fs->no_of_worker_threads, max_threads);
+        g_fs.no_of_worker_threads = std::min(g_fs.no_of_worker_threads, max_threads);
 
-#ifdef _WIN32
     for (int i = 0; i < TFB_NUMBER_OF_FIBERS; ++i)
     {
-        void* fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, fiber_main_loop, fs);
-
-        if (fiber == nullptr)
-        {
-            // Todo: Free
-            DWORD err = GetLastError();
-            return -1;
-        }
-        fs->fiber_pool.enqueue(fiber);
+        FIBER_TYPE fiber = create_fiber(fiber_main_loop);
+        g_fs.fiber_pool.enqueue(fiber);
     }
 
     // Switch away from main thread and start worker system
-    fs->main_fiber = ConvertThreadToFiber(nullptr);
-    fs->worker_threads_fiber = CreateFiber(TFB_DEFAULT_STACKSIZE, start_workers, fs);
-    SwitchToFiber(fs->worker_threads_fiber); // Lose main fiber from main thread
+    g_fs.main_fiber = convert_thread_to_fiber();
+    g_fs.start_workers_fiber = create_fiber(start_workers);
+    switch_to_fiber(g_fs.start_workers_fiber); // Lose main fiber from main thread
     // Worker thread will execute from here now
-#else
-    for (int i = 0; i < TFB_NUMBER_OF_FIBERS; ++i)
-    {
-        ucontext_t context;
-        if (getcontext(&context) == -1)
-        {
-            // Todo: Free
-            return -1;
-        }
-        context.uc_stack.ss_sp = FIBER_STACKS + TFB_DEFAULT_STACKSIZE * i;
-        context.uc_stack.ss_size = TFB_DEFAULT_STACKSIZE;
-        makecontext(&context, fiber_main_loop, 0);
-        fs->fiber_pool.enqueue(context);
-    }
-    getcontext(&fs->main_fiber);
-    getcontext(&fs->worker_threads_fiber);
-    fs->worker_threads_fiber.uc_stack.ss_sp = FIBER_STACKS + TFB_DEFAULT_STACKSIZE * TFB_NUMBER_OF_FIBERS;
-    fs->worker_threads_fiber.uc_stack.ss_size = TFB_DEFAULT_STACKSIZE;
-    fs->worker_threads_fiber.uc_link = &fs->main_fiber;
-    makecontext(&fs->worker_threads_fiber, start_workers, 0);
-    swapcontext(&fs->main_fiber, &fs->worker_threads_fiber);
-#endif
+    LOG("Now as a main fiber in the pool.");
     return 0;
 }
 
 // Must be called from main fiber (eg, from no job)
-int tfb_free_ext(TfbContext** fiber_system)
+int tfb_free()
 {
-#ifdef _WIN32
-    TfbContext* fs = l_my_fiber_system;
-
-    if (fs == nullptr)
-        return -1;
-
-    if (fiber_system != nullptr && (*fiber_system != fs))
-        return -1;
+    LOG("called.");
 
     {
-        std::lock_guard<std::mutex> lk(fs->pending_jobs_mx);
-        fs->should_exit = true;
+        std::scoped_lock<std::mutex> lk(g_fs.pending_jobs_mx);
+        g_fs.should_exit = true;
     }
 
-    fs->no_job_cv.notify_all();
-
-    SwitchToFiber(fs->l_worker_fiber);
-
-    ConvertFiberToThread();
+    g_fs.no_job_cv.notify_all();
+    LOG("Switching to worker fiber");
+    switch_to_fiber(g_fs.l_worker_fiber);
+    LOG("The main thread is back on main with no worker threads!");
+    convert_fiber_to_thread();
 
     // Delete fibers
-    DeleteFiber(fs->init_fibers_fiber);
-    void** deallocate_fibers = fs->fiber_pool.data();
-    for (int i = 0; i < TFB_NUMBER_OF_FIBERS; ++i)
-        DeleteFiber(deallocate_fibers[i]);
-    fs->fiber_pool.free();
-    fs->job_queue.free();
 
-    delete fs;
+    delete_fiber(g_fs.start_workers_fiber);
+    FIBER_TYPE deallocate_fibers[TFB_NUMBER_OF_FIBERS];
 
-    l_my_fiber_system = nullptr;
-    if (fiber_system != nullptr)
-        *fiber_system = nullptr;
-#endif
+    std::int64_t dequed;
+    LOG("before");
+    g_fs.fiber_pool.dequeue(deallocate_fibers, TFB_NUMBER_OF_FIBERS, &dequed);
+    LOG("after");
+
+    for (int i = 0; i < dequed; ++i)
+        delete_fiber(deallocate_fibers[i]);
+    g_fs.job_queue = TinyRingBuffer<TfbJobDeclaration>();
+    g_fs.fiber_pool = TinyRingBuffer<FIBER_TYPE>();
     return 0;
 }
 
-int tfb_add_jobdecl_ext(TfbContext* fiber_system, TfbJobDeclaration* job)
+int tfb_add_jobdecl(TfbJobDeclaration* job)
 {
-#ifdef _WIN32
     if (job == nullptr)
         return -1;
 
     if (job->func == nullptr)
         return 0;
 
-    TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
-
     if (job->wait_handle != nullptr)
-        reinterpret_cast<std::atomic_int64_t&>(job->wait_handle->_counter)++;
+    {
+        job->wait_handle->_counter++;
+    }
 
-    TinyRingBufferStatus sts = fs.job_queue.enqueue(*job);
+    TinyRingBufferStatus sts = g_fs.job_queue.enqueue(*job);
     if (sts != TinyRingBufferStatus::SUCCESS)
         return -1;
 
     {
-        std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
-        ++fs.no_of_pending_jobs;
+        std::scoped_lock<std::mutex> lk(g_fs.pending_jobs_mx);
+        ++g_fs.no_of_pending_jobs;
     }
-    fs.no_job_cv.notify_one();
-#endif
+    g_fs.no_job_cv.notify_one();
+
     return 0;
 }
 
 // Must have the same WaitHandler*
-int tfb_add_jobdecls_ext(TfbContext* fiber_system, TfbJobDeclaration jobs[], int64_t elements)
+int tfb_add_jobdecls(TfbJobDeclaration jobs[], int64_t elements)
 {
-#ifdef _WIN32
-    TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
-
     if (jobs[0].wait_handle != nullptr)
-        reinterpret_cast<std::atomic_int64_t&>(jobs[0].wait_handle->_counter) += elements;
+        jobs[0].wait_handle->_counter += elements;
 
-    if (fs.job_queue.enqueue(jobs, elements) != TinyRingBufferStatus::SUCCESS)
+    if (g_fs.job_queue.enqueue(jobs, elements) != TinyRingBufferStatus::SUCCESS)
         return -1;
 
     {
-        std::lock_guard<std::mutex> lk(fs.pending_jobs_mx);
-        fs.no_of_pending_jobs += elements;
+        std::scoped_lock<std::mutex> lk(g_fs.pending_jobs_mx);
+        g_fs.no_of_pending_jobs += elements;
     }
-    fs.no_job_cv.notify_all();
-#endif
+    g_fs.no_job_cv.notify_all();
     return 0;
 }
 
-int tfb_await_ext(TfbContext* fiber_system, TfbWaitHandle* wait_handle)
+int tfb_await(TfbWaitHandle* wait_handle)
 {
     if (wait_handle == nullptr)
         return -1;
-#ifdef _WIN32
-    TfbContext& fs = *(fiber_system == TFB_MY_CONTEXT ? l_my_fiber_system : fiber_system);
 
-    AcquireSRWLockExclusive((PSRWLOCK)&wait_handle->_lock);
+    lock(wait_handle->_lock);
 
     // Put this to fiber queue
-    if (reinterpret_cast<std::atomic_int64_t&>(wait_handle->_counter).load() == 0)
+    if (wait_handle->_counter == 0)
     {
-        ReleaseSRWLockExclusive((PSRWLOCK)&wait_handle->_lock);
+        unlock(wait_handle->_lock);
         return 0;
     }
 
-    wait_handle->_fiber = GetCurrentFiber();
-    fs.l_wait_handle_lock = (PSRWLOCK)&wait_handle->_lock;
+    wait_handle->_fiber = get_current_fiber();
+    g_fs.l_wait_handle_lock = &wait_handle->_lock;
 
-    void* new_fiber;
-    if (fs.fiber_pool.dequeue(&new_fiber) == TinyRingBufferStatus::SUCCESS)
+    FIBER_TYPE new_fiber;
+    if (g_fs.fiber_pool.dequeue(&new_fiber) == TinyRingBufferStatus::SUCCESS)
     {
-        SwitchToFiber(new_fiber);
+        switch_to_fiber(new_fiber);
         // put back fiber we yield from to pool
-        fs.fiber_pool.enqueue(fs.l_finished_fiber);
-        fs.l_finished_fiber = nullptr;
+        g_fs.fiber_pool.enqueue(g_fs.l_finished_fiber);
+        g_fs.l_finished_fiber = nullptr;
     }
     else
     {
+        LOG("Failed to dequeue fiber");
         return -1;
     }
-#endif
     return 0;
+}
+
+int tfb_thread_id()
+{
+    return g_fs.l_thread_number;
 }
